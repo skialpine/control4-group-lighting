@@ -360,4 +360,173 @@ T.eq("one turned off turns the rest off", sentTo(401, "RAMP_TO_LEVEL")[1].params
 T.eq("the group is off", tonumber(lastToProxy("LIGHT_BRIGHTNESS_CHANGED").LIGHT_BRIGHTNESS_CURRENT), 0)
 group.configure({ keepSync = false })
 
+local function noneToProxy(command, level)
+  for _, sent in ipairs(toProxy) do
+    if sent.command == command and tonumber(sent.params.LIGHT_BRIGHTNESS_CURRENT) == level then
+      return false
+    end
+  end
+  return true
+end
+
+T.section("On reaches the lights that are off in a group that reads as on")
+device(501, "P", DIMMER, 100)
+device(502, "Q", DIMMER, 0)
+ShimSetDevices(devices)
+group.setMembers({ { id = 501, name = "P" }, { id = 502, name = "Q" } })
+settle()
+T.eq(
+  "the group reads as on, at the level of the light that is",
+  tonumber(lastToProxy("LIGHT_BRIGHTNESS_CHANGED").LIGHT_BRIGHTNESS_CURRENT),
+  100
+)
+clear()
+RFP.SET_BRIGHTNESS_TARGET(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 })
+T.eq(
+  "the level it already shows still goes to the light that is off",
+  sentTo(502, "RAMP_TO_LEVEL")[1].params.LEVEL,
+  100
+)
+report(502, 1001, 0)
+settle()
+group.configure({ lightType = "On/Off" })
+group.refresh()
+clear()
+RFP.ON(5001, "ON", {})
+T.eq("and so does a plain on", #sentTo(502, "ON"), 1)
+group.configure({ lightType = "Automatic" })
+group.refresh()
+report(502, 1001, 100)
+settle()
+
+T.section("A stop mid-ramp finds the lights an even share of the way")
+T.eq("the ramp is taken as even", group.adapter().curve(0.2), 0.2)
+
+T.section("Kept in sync, lights set apart together are left apart")
+device(601, "A", DIMMER, 50)
+device(602, "B", DIMMER, 50)
+device(603, "C", DIMMER, 50)
+ShimSetDevices(devices)
+group.setMembers({ { id = 601, name = "A" }, { id = 602, name = "B" }, { id = 603, name = "C" } })
+settle()
+group.configure({ keepSync = true })
+clear()
+report(601, 1001, 30)
+report(602, 1001, 80)
+settle()
+T.eq("a scene's levels are not flattened", #toDevices, 0)
+T.eq("the group shows their average", tonumber(lastToProxy("LIGHT_BRIGHTNESS_CHANGED").LIGHT_BRIGHTNESS_CURRENT), 53)
+
+T.section("Kept in sync, a light still moving is followed to where it stops")
+clear()
+report(603, 1001, 70)
+now = now + 300
+ShimFireTimers()
+T.eq("followed at once", sentTo(601, "RAMP_TO_LEVEL")[1].params.LEVEL, 70)
+clear()
+report(603, 1001, 90)
+report(601, 1001, 70)
+report(602, 1001, 70)
+settle()
+T.eq("and again where it ended", sentTo(601, "RAMP_TO_LEVEL")[1].params.LEVEL, 90)
+T.eq("without being sent anything itself", #sentTo(603), 0)
+report(601, 1001, 90)
+report(602, 1001, 90)
+settle()
+
+T.section("Held, the lights are not followed")
+clear()
+group.hold(5000)
+report(601, 1001, 20)
+now = now + 300
+ShimFireTimers()
+T.eq("a light set by a scene the driver activated", #toDevices, 0)
+settle()
+group.configure({ keepSync = false })
+
+T.section("A color leaves a light that is off by itself off")
+device(701, "Lamp", TUNABLE, 50)
+device(702, "Lamp 2", TUNABLE, 0)
+ShimSetDevices(devices)
+group.setMembers({ { id = 701, name = "Lamp" }, { id = 702, name = "Lamp 2" } })
+settle()
+clear()
+RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+  LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE = 3000,
+  LIGHT_COLOR_TARGET_MODE = 1,
+  LIGHT_COLOR_TARGET_RATE = 0,
+})
+T.eq("the light that is on gets it", #sentTo(701, "SET_COLOR_TARGET"), 1)
+T.eq("the light that is off does not", #sentTo(702), 0)
+
+T.section("A quick command during a long ramp does not end the wait for it")
+report(702, 1001, 50)
+settle()
+clear()
+RFP.SET_BRIGHTNESS_TARGET(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 100, RATE = 30000 })
+RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+  LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE = 4000,
+  LIGHT_COLOR_TARGET_MODE = 1,
+  LIGHT_COLOR_TARGET_RATE = 0,
+})
+report(701, 1001, 62)
+report(702, 1001, 62)
+now = now + 3000
+ShimFireTimers()
+T.check("a level on the way is not the group's", noneToProxy("LIGHT_BRIGHTNESS_CHANGED", 62))
+report(701, 1001, 100)
+report(702, 1001, 100)
+settle()
+
+T.section("A white scaled onto each light's range reads back as the group's")
+local WIDE = caps({
+  dimmer = "True",
+  supports_color_correlated_temperature = "True",
+  color_correlated_temperature_min = 2000,
+  color_correlated_temperature_max = 6500,
+})
+device(801, "Narrow", TUNABLE, 50)
+device(802, "Wide", WIDE, 50)
+ShimSetDevices(devices)
+group.setMembers({ { id = 801, name = "Narrow" }, { id = 802, name = "Wide" } })
+group.configure({ scaled = true })
+settle()
+clear()
+RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+  LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE = 4250,
+  LIGHT_COLOR_TARGET_MODE = 1,
+  LIGHT_COLOR_TARGET_RATE = 0,
+})
+local narrow = sentTo(801, "SET_COLOR_TARGET")[1].params.LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE
+local wide = sentTo(802, "SET_COLOR_TARGET")[1].params.LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE
+T.check("the lights are sent different whites", math.abs(narrow - wide) > 200, narrow .. " and " .. wide)
+settle()
+local told = #toProxy
+local nx, ny = C4:ColorCCTtoXY(narrow)
+local wx2, wy2 = C4:ColorCCTtoXY(wide)
+report(801, 1200, nx .. "," .. ny .. ",1")
+report(802, 1200, wx2 .. "," .. wy2 .. ",1")
+settle()
+local moved = false
+for i = told + 1, #toProxy do
+  moved = moved or toProxy[i].command == "LIGHT_COLOR_CHANGED"
+end
+T.falsy("the group's white does not move", moved)
+T.eq("and the lights are in step", status.inSync, true)
+group.configure({ scaled = false })
+
+T.section("Ignore keeps the group's level through a change of setting")
+device(901, "Solo", DIMMER, 80)
+ShimSetDevices(devices)
+group.setMembers({ { id = 901, name = "Solo" } })
+settle()
+group.configure({ brightnessTracking = "Ignore" })
+clear()
+report(901, 1001, 20)
+settle()
+group.configure({ lightType = "Dimmer" })
+group.refresh()
+T.check("the lights are not read again", noneToProxy("LIGHT_BRIGHTNESS_CHANGED", 20))
+group.configure({ brightnessTracking = "Average", lightType = "Automatic" })
+
 T.finish()

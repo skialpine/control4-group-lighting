@@ -135,4 +135,51 @@ cycle.configure({ track = false })
 cycle.track({ [900] = { level = 55 } })
 T.eq("off, the cycle keeps its own place", cycle.current().name, "Bright")
 
+T.section("Previous from no scene is the last")
+cycle.configure({ track = true, offStep = false })
+cycle.restart()
+activated = {}
+cycle.previous()
+T.eq("not the one before it", activated, { "Relax" })
+
+T.section("The scene it is at stays so when the scenes around it change")
+cycle.setChoice({}, {})
+cycle.goTo("Relax")
+T.eq("second of two", cycle.current().position, 2)
+cycle.setScenes({
+  { id = 5, name = "Bright", members = { 900 }, targets = { ["900"] = { level = 100 } } },
+  { id = 6, name = "Dinner", members = { 900 }, targets = { ["900"] = { level = 60 } } },
+  { id = 7, name = "Relax", members = { 1, 2 }, targets = { ["1"] = { level = 30 }, ["2"] = { level = 30 } } },
+}, 421)
+T.eq("a scene added before it", cycle.current().name, "Relax")
+T.eq("by its id", cycle.current().id, 7)
+T.eq("now third of three", cycle.current().position, 3)
+cycle.configure({ any = false })
+cycle.configure({ any = true })
+T.eq("and a setting changed and back leaves it", cycle.current().name, "Relax")
+
+T.section("Lights that settle short of a scene still hold it")
+cycle.goTo("Dinner")
+now = now + 6000
+local short = { [900] = { level = 55 }, [1] = { level = 55 }, [2] = { level = 55 } }
+cycle.track(short)
+T.eq("where they settle is the scene, here", cycle.current().name, "Dinner")
+cycle.track(short)
+T.eq("and stays it", cycle.current().name, "Dinner")
+cycle.track({ [900] = { level = 20 }, [1] = { level = 20 }, [2] = { level = 20 } })
+T.eq("until they are changed", cycle.current().position, 0)
+
+T.section("A scene's white against a light that shows a color")
+function C4:ColorCCTtoXY(kelvin)
+  return kelvin == 3000 and 0.4369 or 0.3805, kelvin == 3000 and 0.4041 or 0.3768
+end
+cycle.setScenes({
+  { id = 5, name = "Warm", members = { 900 }, targets = { ["900"] = { level = 50, kelvin = 3000 } } },
+}, 421)
+cycle.restart()
+cycle.track({ [900] = { level = 50, x = 0.64, y = 0.33 } })
+T.eq("red at the scene's level is no match", cycle.current().position, 0)
+cycle.track({ [900] = { level = 50, x = 0.437, y = 0.404 } })
+T.eq("the white's own color is", cycle.current().name, "Warm")
+
 T.finish()

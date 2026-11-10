@@ -61,12 +61,13 @@ local settings = {
 
 --- @class Member: MemberState
 --- @field name string
---- @field supportsTarget boolean|nil False for a light that takes a level and a time, as before OS 3.3.
 --- @field supportsColor boolean|nil
 --- @field supportsCCT boolean|nil
 --- @field minKelvin number|nil
 --- @field maxKelvin number|nil
 --- @field sentKelvin number|nil The white last sent as a color to a light without color temperature.
+--- @field sentWhite { asked: number, sent: number }|nil The group's white last sent, and what this light was sent
+---   for it on its own range.
 
 --- @type Member[]
 local members = {}
@@ -88,8 +89,15 @@ local vstate = {
 
 --- When the lights have settled after the group's last command (C4:GetTime, ms).
 local busyUntil = 0
---- The light last changed by something other than the group, for the others to follow when kept in sync.
-local lastChanged = nil
+--- Its two parts: a level command replaces the level ramp before it, and a color command the color fade.
+local levelBusyUntil, colorBusyUntil = 0, 0
+--- Whether the lights have been read into the group once, which Ignore still allows.
+local seeded = false
+--- The lights changed by something other than the group since they were last read, for the others to follow one
+--- when kept in sync.
+local changedLights = {}
+--- The light the others were last sent after: its further reports still count while they settle.
+local followed = nil
 local queue = {}
 local controlLog = {}
 local onChange = function() end
@@ -263,9 +271,6 @@ local function readCapabilities(member)
   if caps.dimmer ~= nil then
     member.dimmable = isTrue(caps.dimmer)
   end
-  if caps.supports_target ~= nil then
-    member.supportsTarget = isTrue(caps.supports_target)
-  end
   member.supportsColor = isTrue(caps.supports_color)
   member.supportsCCT = isTrue(caps.supports_color_correlated_temperature)
   member.minKelvin = tonumber(caps.color_correlated_temperature_min)
@@ -298,6 +303,12 @@ local function readColor(member, value)
   local color = { mode = mode == COLOR_MODE_CCT and COLOR_MODE_CCT or COLOR_MODE_FULL, x = x, y = y }
   if color.mode == COLOR_MODE_CCT then
     color.kelvin = tonumber(C4:ColorXYtoCCT(x, y))
+    -- The white this light was sent for the group's, mapped onto its own range, reads as the group's.
+    local white = member.sentWhite
+    if white and color.kelvin and math.abs(color.kelvin - white.sent) <= math.max(50, 0.02 * white.sent) then
+      color.kelvin = white.asked
+      color.x, color.y = C4:ColorCCTtoXY(white.asked)
+    end
   elseif member.sentKelvin then
     -- A white this light was sent as a color still reads as that white.
     local wx, wy = C4:ColorCCTtoXY(member.sentKelvin)
@@ -327,9 +338,10 @@ end
 --- @param before string What it showed before the report.
 local function reported(member, before)
   local now = showing(member)
-  -- A report while the lights settle is the group's own command taking effect.
-  if member.watched and now ~= before and C4:GetTime() >= busyUntil then
-    lastChanged = member
+  -- A report while the lights settle is the group's own command taking effect, but for the light the others are
+  -- following: it may still be moving.
+  if member.watched and now ~= before and (C4:GetTime() >= busyUntil or member == followed) then
+    changedLights[member] = true
   end
   scheduleFeedback()
 end
@@ -431,9 +443,15 @@ evaluate = function(force)
     scheduleFeedback()
     return
   end
-  local source = lastChanged
-  lastChanged = nil
-  if settings.keepSync and source and not force and Group.follow(source) then
+  -- One light changed by itself takes the others with it. Several changed together is a scene, or programming,
+  -- which set each light where it wants it.
+  local source, count = nil, 0
+  for member in pairs(changedLights) do
+    source, count = member, count + 1
+  end
+  changedLights = {}
+  followed = nil
+  if settings.keepSync and count == 1 and not force and Group.follow(source) then
     onChange(Group.status())
     return
   end
@@ -448,8 +466,10 @@ evaluate = function(force)
   end
   local commanded = vLevel()
   -- Ignore still reads the lights once, at start, for a level to show.
+  local first = not seeded
+  seeded = true
   local tracking = settings.brightnessTracking
-  if force and tracking == Aggregate.Brightness.IGNORE then
+  if first and tracking == Aggregate.Brightness.IGNORE then
     tracking = Aggregate.Brightness.AVERAGE
   end
   local level = Aggregate.level(members, tracking, settings.trackedId, commanded)
@@ -468,7 +488,7 @@ evaluate = function(force)
   end
   if color or cct then
     local colorTracking = settings.colorTracking
-    if force and colorTracking == Aggregate.Color.IGNORE then
+    if first and colorTracking == Aggregate.Color.IGNORE then
       colorTracking = Aggregate.Color.AVERAGE
     end
     local shown = Aggregate.color(members, colorTracking, settings.trackedId)
@@ -557,6 +577,8 @@ local function sendColor(member, color, rate)
       local kelvin =
         Aggregate.mapKelvin(color.kelvin, groupMin, groupMax, member.minKelvin, member.maxKelvin, settings.scaled)
       member.sentKelvin = nil
+      -- What the light answers with is its own white for the group's, and reads back as the group's.
+      member.sentWhite = { asked = color.kelvin, sent = math.floor(kelvin + 0.5) }
       -- A white goes as its temperature: on OS 4.3 a light's proxy did nothing with one sent as xy.
       params = {
         LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE = math.floor(kelvin + 0.5),
@@ -565,10 +587,12 @@ local function sendColor(member, color, rate)
     elseif member.supportsColor and settings.emulate then
       local x, y = C4:ColorCCTtoXY(color.kelvin)
       member.sentKelvin = color.kelvin
+      member.sentWhite = nil
       params = { LIGHT_COLOR_TARGET_X = x, LIGHT_COLOR_TARGET_Y = y, LIGHT_COLOR_TARGET_MODE = COLOR_MODE_FULL }
     end
   elseif member.supportsColor then
     member.sentKelvin = nil
+    member.sentWhite = nil
     params =
       { LIGHT_COLOR_TARGET_X = color.x, LIGHT_COLOR_TARGET_Y = color.y, LIGHT_COLOR_TARGET_MODE = COLOR_MODE_FULL }
   end
@@ -615,7 +639,8 @@ local function send(cmd, except)
     level = math.max(1, math.min(100, math.floor((cmd.brightness or 1) * 100 + 0.5)))
     vstate.state = true
     vstate.brightness = cmd.brightness or 1
-  elseif cmd.has_state and cmd.state and not wasOn then
+  elseif cmd.has_state and cmd.state and not (cmd.has_rgb or cmd.has_color_temperature or cmd.has_color_mode) then
+    -- Also for a group that reads as on: some of its lights may be off.
     level, plainOn = 100, true
     vstate.state = true
     vstate.brightness = 1
@@ -637,7 +662,8 @@ local function send(cmd, except)
   local color = vstate.state and commandColor(cmd) or nil
   for _, member in ipairs(members) do
     if member ~= except then
-      if color then
+      -- A light that is off by itself while the group is on is left off: some turn on for a color.
+      if color and (level or member.level ~= 0) then
         -- A light that is off takes its color at once, then fades up in it.
         sendColor(member, color, (member.level or 0) > 0 and wasOn and rate or 0)
       end
@@ -647,7 +673,17 @@ local function send(cmd, except)
     end
   end
 
-  busyUntil = C4:GetTime() + rate + settings.commandDelay * #queue + settings.feedbackDelay
+  local settled = C4:GetTime() + rate + settings.commandDelay * #queue + settings.feedbackDelay
+  if level then
+    levelBusyUntil = settled
+  end
+  if color then
+    colorBusyUntil = settled
+  end
+  if not level and not color then
+    levelBusyUntil = math.max(levelBusyUntil, settled)
+  end
+  busyUntil = math.max(levelBusyUntil, colorBusyUntil)
   SetTimer("GroupEcho", ECHO_MS, pushState)
   scheduleFeedback()
 end
@@ -657,6 +693,25 @@ end
 function Group.adapter()
   return {
     send = send,
+    -- Lights ramp evenly, so a stop mid-ramp finds them a like share of the way.
+    curve = function(p)
+      return p
+    end,
+    -- A level the group shows that some of its lights are not at is still sent.
+    apart = function(level)
+      for _, member in ipairs(members) do
+        local own = Aggregate.memberLevel(member, level)
+        if
+          own
+          and (
+            (own > 0) ~= (level > 0) or (member.dimmable ~= false and math.abs(own - level) > Aggregate.LEVEL_TOLERANCE)
+          )
+        then
+          return true
+        end
+      end
+      return false
+    end,
     capabilities = { has_extras = false, brightness_rate_max = 86400000, color_rate_max = 86400000 },
   }
 end
@@ -756,7 +811,16 @@ function Group.follow(source)
     cmd.has_color_mode, cmd.color_mode = true, ColorMode.COLOR_MODE_RGB
   end
   send(cmd, source)
+  followed = source
   return true
+end
+
+--- The lights are about to be set by something that is not one light changed by itself, such as a scene the
+--- driver activates: for this long they are not followed.
+--- @param ms integer
+function Group.hold(ms)
+  levelBusyUntil = math.max(levelBusyUntil, C4:GetTime() + ms)
+  busyUntil = math.max(levelBusyUntil, colorBusyUntil)
 end
 
 --- Sends every light the group's level and color again.
@@ -833,7 +897,7 @@ function Group.probe(report)
   }
   local wait = 3000
   -- The group does not read its lights while they are being tried.
-  busyUntil = C4:GetTime() + wait * (#steps + 1)
+  Group.hold(wait * (#steps + 1))
   report(string.format("Trying %d commands on %s [%d], %d s apart", #steps, member.name, member.id, wait / 1000))
   local function shown()
     local level = tostring(C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_LEVEL))

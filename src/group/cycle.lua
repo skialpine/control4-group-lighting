@@ -50,6 +50,10 @@ local XY_TOLERANCE = 0.02
 --- How long after a step the lights are left to reach it before they are compared (ms).
 local SETTLE_MS = 5000
 local holdUntil = 0
+--- The step just activated, until the lights have settled, and then what they settled at.
+local learning = nil
+--- @type { id: integer, shown: table }|nil
+local learned = nil
 
 --- @type table<integer, true> The group's lights, and the group itself.
 local lights = {}
@@ -139,10 +143,24 @@ function Cycle.steps()
   return steps
 end
 
+--- The step the cycle is at is kept by its scene, so it stays that scene when the steps around it change.
+--- @param step CycleStep|nil
+local function keep(step)
+  persist:set(POSITION_KEY, step and { id = step.id } or nil)
+end
+
 --- @return integer position 0 before the first step, or when the step it was at has gone.
 local function position()
-  local at = tointeger(persist:get(POSITION_KEY)) or 0
-  return at <= #Cycle.steps() and at or 0
+  local kept = persist:get(POSITION_KEY)
+  local id = type(kept) == "table" and tointeger(kept.id) or nil
+  if id then
+    for at, step in ipairs(Cycle.steps()) do
+      if step.id == id then
+        return at
+      end
+    end
+  end
+  return 0
 end
 
 --- @return { position: integer, id: integer|nil, name: string, off: boolean }
@@ -166,9 +184,11 @@ local function go(at, reason)
     log:debug("The scene cycle has no step %s", at)
     return
   end
-  persist:set(POSITION_KEY, at)
+  keep(step)
   lastAt = C4:GetTime()
   holdUntil = lastAt + SETTLE_MS
+  -- Where the lights settle is what this scene looks like here, whatever its targets say.
+  learning, learned = step.id, nil
   log:info("Scene cycle: %s (%d of %d, %s)", step.name, at, #steps, reason)
   activate(step)
   onChange(Cycle.current(), at == #steps)
@@ -188,15 +208,25 @@ local function sceneMatches(scene, shown)
         end
       end
       -- A light that is off shows no color to compare.
-      if light.level > 0 and target.kelvin and light.kelvin then
+      if light.level > 0 and (target.kelvin or (target.x and target.y)) and (light.kelvin or (light.x and light.y)) then
         compared = compared + 1
-        if math.abs(light.kelvin - target.kelvin) > KELVIN_TOLERANCE * target.kelvin then
-          return false
-        end
-      elseif light.level > 0 and target.x and target.y and light.x and light.y then
-        compared = compared + 1
-        if math.abs(light.x - target.x) > XY_TOLERANCE or math.abs(light.y - target.y) > XY_TOLERANCE then
-          return false
+        if target.kelvin and light.kelvin then
+          if math.abs(light.kelvin - target.kelvin) > KELVIN_TOLERANCE * target.kelvin then
+            return false
+          end
+        else
+          -- One a white and the other a color: compared as colors.
+          local tx, ty = target.x, target.y
+          if target.kelvin then
+            tx, ty = C4:ColorCCTtoXY(target.kelvin)
+          end
+          local lx, ly = light.x, light.y
+          if not (lx and ly) then
+            lx, ly = C4:ColorCCTtoXY(light.kelvin)
+          end
+          if math.abs(lx - tx) > XY_TOLERANCE or math.abs(ly - ty) > XY_TOLERANCE then
+            return false
+          end
         end
       end
     end
@@ -205,6 +235,30 @@ local function sceneMatches(scene, shown)
     return nil
   end
   return true
+end
+
+--- @return boolean same Whether the lights are where they settled after the cycle's own step.
+local function asLearned(shown)
+  local compared = 0
+  for id, was in pairs(learned.shown) do
+    local light = shown[id]
+    if light and light.level and was.level then
+      compared = compared + 1
+      if math.abs(light.level - was.level) > LEVEL_TOLERANCE then
+        return false
+      end
+      if light.level > 0 and light.kelvin and was.kelvin then
+        if math.abs(light.kelvin - was.kelvin) > KELVIN_TOLERANCE * was.kelvin then
+          return false
+        end
+      elseif light.level > 0 and light.x and was.x then
+        if math.abs(light.x - was.x) > XY_TOLERANCE or math.abs(light.y - was.y) > XY_TOLERANCE then
+          return false
+        end
+      end
+    end
+  end
+  return compared > 0
 end
 
 --- Follows the lights: the step they match becomes the current one, without being activated, and none is current
@@ -236,8 +290,23 @@ function Cycle.track(shown)
   end
   local steps = Cycle.steps()
   local was = position()
+  -- The first reading after the cycle's own step is that step, as these lights show it: a light may settle short
+  -- of a scene's level, or have no such color.
+  if learning and steps[was] and steps[was].id == learning then
+    local copy = {}
+    for id, light in pairs(shown) do
+      copy[id] = { level = light.level, kelvin = light.kelvin, x = light.x, y = light.y }
+    end
+    learned = { id = learning, shown = copy }
+    learning = nil
+    return
+  end
+  learning = nil
   local now = 0
   local current = steps[was] and matches(steps[was])
+  if current == false and learned and steps[was].id == learned.id and asLearned(shown) then
+    current = true
+  end
   if current == true or (current == nil and steps[was] and not steps[was].off) then
     -- Still there, or a scene whose lights cannot be compared: left as it is.
     now = was
@@ -251,16 +320,18 @@ function Cycle.track(shown)
   end
   if now ~= was then
     log:debug("Scene cycle: the lights now match %s", steps[now] and steps[now].name or "no scene")
-    persist:set(POSITION_KEY, now)
+    keep(steps[now])
+    learned = nil
     onChange(Cycle.current(), false)
   end
 end
 
 --- Forgets where the cycle is, so the next step is the first.
 function Cycle.restart()
-  persist:set(POSITION_KEY, 0)
+  keep(nil)
   direction = 1
   lastAt = nil
+  learning, learned = nil, nil
   onChange(Cycle.current(), false)
 end
 
@@ -292,7 +363,9 @@ function Cycle.previous()
   if count == 0 then
     return
   end
-  go((position() - 2) % count + 1, "previous")
+  local at = position()
+  -- From no scene, the one before the first is the last.
+  go(at == 0 and count or (at - 2) % count + 1, "previous")
 end
 
 --- @param scene integer|string A scene's id or name, or "Off".
@@ -347,16 +420,7 @@ function Cycle.setChoice(order, excluded)
     end
     return out
   end
-  -- The step it was at keeps its place if it is still a step.
-  local was = Cycle.current()
   persist:set(CHOICE_KEY, { order = ids(order), excluded = ids(excluded) })
-  local at = 0
-  for i, step in ipairs(Cycle.steps()) do
-    if (was.off and step.off) or (was.id and step.id == was.id) then
-      at = i
-    end
-  end
-  persist:set(POSITION_KEY, at)
   onChange(Cycle.current(), false)
 end
 

@@ -19,6 +19,7 @@ control4-wled
 https://github.com/finitelabs/control4-wled (commit f04ca7a782b75ce77d6929f4216dee1b432fee31)
 
 src/group/light.lua is src/wled/light.lua, the Light V2 light model, with its
-DriverCentral diagnostics hooks removed and its module path changed.
+DriverCentral diagnostics hooks removed, its module path changed, and one adapter
+hook added (apart) for a device that is several lights.
 src/constants.lua and test/c4_local.lua are taken from the same project.
 Copyright Finite Labs, LLC. Licensed under the GNU AGPL v3.

@@ -213,6 +213,8 @@ local function advancedLighting()
 end
 
 cycle.onActivate(function(step)
+  -- A scene sets each light where it wants it: none of them is one light changed by itself, to be followed.
+  group.hold(5000)
   if step.off then
     RFP.OFF(PROXY_BINDING, "OFF", {})
     return

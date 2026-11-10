@@ -16,6 +16,9 @@
 ---   echoWaitMs           optional; how long a report of a command may lag
 ---   capabilities         optional; capability values that override the
 ---                        derived ones
+---   apart(level)         optional; whether the device is not wholly at a
+---                        level it shows, so a command to that level still
+---                        goes out
 ---
 --- An adapter's curve, normalize and pre-on handling cover where its device
 --- differs from the default model.
@@ -1918,7 +1921,9 @@ local function rampToBrightness(level, rate, presetId, replaced)
   if level == startingLevel and not startAt then
     -- Still send if the bulb is heading elsewhere (a replaced ramp), sits
     -- outside a zero-width range, or is off its Dim-To-Warm color.
-    if replaced or outsideRange(lightBrightness or 0) or awayFromFadeColor(level) then
+    -- Or, for a device that is several lights, some of them are elsewhere.
+    local apart = adapter.apart and adapter.apart(level)
+    if replaced or outsideRange(lightBrightness or 0) or awayFromFadeColor(level) or apart then
       setDeviceBrightness(level, 0)
     end
     notifyBrightnessChanged(level)

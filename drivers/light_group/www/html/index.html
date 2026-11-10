@@ -444,6 +444,8 @@ function readScenes() {
       return Promise.all(
         list.map(function (scene) {
           return Kit.api("GET", "/api/v1/agents/advanced_lighting/" + scene.scene_id).then(function (detail) {
+            // A scene that could not be read would drop out of the cycle: the scenes kept are left as they are.
+            if (!detail) throw new Error("Scene " + scene.scene_id + " could not be read");
             var members = detail && detail.all_members ? detail.all_members.AdvSceneMember : [];
             members = Array.isArray(members) ? members : members ? [members] : [];
             // Where the scene leaves each light: its last element's level and color.
@@ -477,6 +479,11 @@ function readScenes() {
     .then(function (scenes) {
       readingScenes = false;
       if (scenes) Kit.sendCommand("SET_SCENES", { agentId: agentId, scenes: scenes });
+      renderScenes();
+    })
+    .catch(function (e) {
+      console.error("Reading scenes:", e);
+      readingScenes = false;
       renderScenes();
     });
 }
