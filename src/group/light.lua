@@ -172,6 +172,8 @@ local DEFAULT_COLOR_Y = 0.3290
 local ENTITY
 local STATE
 local currentBrightness = 0
+-- True only after a brightness report was sent for this connection.
+local brightnessReported = false
 local ledState = false
 local supportsDimming = false
 local supportsColor = false
@@ -1411,10 +1413,12 @@ local function notifyBrightnessChanged(level)
   -- proxy / Daylight Agent (spec _10.2 / _2.1) knows the active preset still
   -- owns the current level. Nil keys are dropped from the table at construct
   -- time, so this is equivalent to omitting the field when no preset is set.
+  brightnessReported = false
   SendToProxy(PROXY_BINDING, "LIGHT_BRIGHTNESS_CHANGED", {
     LIGHT_BRIGHTNESS_CURRENT = level,
     LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = currentBrightnessPresetId,
   }, "NOTIFY")
+  brightnessReported = true
   matchLedState(level > 0)
 end
 
@@ -3564,6 +3568,7 @@ function Light.disconnect(isSuspended)
   stopAllScenes()
   ENTITY = nil
   STATE = nil
+  brightnessReported = false
   dynamicCapsSent = false
   supportsDimming = false
   supportsColor = false
@@ -3629,7 +3634,7 @@ function Light.state(entity, state)
   end
 
   -- Send dynamic capabilities after ONLINE_CHANGED
-  if isFirstUpdate or changed then
+  if isFirstUpdate or changed or not dynamicCapsSent then
     dynamicCapsSent = false
     updateDynamicCapabilities(entity)
   end
@@ -3697,25 +3702,6 @@ function Light.state(entity, state)
     lightFade = nil
   end
 
-  -- A first report since a load, bind or disconnect is held against the
-  -- proxy's Brightness Percent, unless its target (a ramp's; an on/off light's
-  -- proxy has none) is another: after a controller start it fires Brightness
-  -- Changed for any level it is told. One told keeps the level a load starts
-  -- at, so an off stores no Previous.
-  local shownLevel
-  if isFirstUpdate then
-    local ok, level, target = pcall(function()
-      if Light.initialized then
-        local proxy = C4:GetProxyDevices()
-        return C4:GetDeviceVariable(proxy, 1001), C4:GetDeviceVariable(proxy, 1110)
-      end
-    end)
-    level = ok and tointeger(level)
-    if level and level >= 0 and level <= 100 and (target == nil or tointeger(target) == level) then
-      shownLevel = level
-    end
-  end
-
   -- During a ramp the device's echo confirms the level the ramp is heading for,
   -- not where the bulb is, so it is ignored: the ramp's end tells the level.
   if rampingBrightness and taken then
@@ -3730,10 +3716,9 @@ function Light.state(entity, state)
         notifyBrightnessChanged(newBrightness)
       end
     end)
-  elseif shownLevel and sameLevel(newBrightness, shownLevel) then
-    currentBrightness = shownLevel
-    matchLedState(currentBrightness > 0)
-  elseif isFirstUpdate or not sameLevel(newBrightness, currentBrightness) then
+  elseif isFirstUpdate or not brightnessReported or not sameLevel(newBrightness, currentBrightness) then
+    -- A cached value is not a report from this connection. Seed the proxy with
+    -- the observed numeric level once, including zero; later duplicates stay quiet.
     notifyBrightnessChanged(newBrightness)
   end
 
@@ -3771,6 +3756,7 @@ end
 function Light.reset(isBound)
   ENTITY = nil
   STATE = nil
+  brightnessReported = false
   suspended = false
   dynamicCapsSent = false
   supportsDimming = false
