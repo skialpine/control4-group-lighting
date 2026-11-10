@@ -1,0 +1,13 @@
+# Kept out of Makefile so `copier update` cannot clobber these.
+
+# Only the open-source distribution is released (.github/workflows/release.yml). The DriverCentral one still
+# builds, since the template's docs step needs it, but it has no product id or build secret and is not published.
+# Preserve CI/command-line overrides; otherwise use the committed release revision.
+ifeq ($(filter environment command,$(origin DRIVER_VERSION)),)
+DRIVER_VERSION := $(shell python3 tools/release_version.py current)
+endif
+
+.PHONY: verify-release-version
+verify: verify-release-version
+verify-release-version:
+	python3 tools/package.py check-version oss "$(DRIVER_VERSION)"
