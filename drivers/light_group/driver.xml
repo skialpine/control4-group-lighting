@@ -1,0 +1,558 @@
+<devicedata>
+  <name>Light Group</name>
+  <version/>
+  <manufacturer>Open Source</manufacturer>
+  <model>Light Group</model>
+  <creator>skialpine</creator>
+  <control>lua_gen</control>
+  <driver>DriverWorks</driver>
+  <copyright>Copyright 2026 the control4-group-lighting contributors. Licensed under the GNU AGPL v3.</copyright>
+  <created>11/10/2026 12:00:00 PM</created>
+  <modified/>
+  <minimum_os_version>3.3.2</minimum_os_version>
+  <composer_categories>
+    <category>Lighting</category>
+  </composer_categories>
+  <conditionals/>
+  <events>
+    <event>
+      <id>1</id>
+      <name>All Lights On</name>
+      <description>When every light in NAME is on</description>
+    </event>
+    <event>
+      <id>2</id>
+      <name>All Lights Off</name>
+      <description>When every light in NAME is off</description>
+    </event>
+    <event>
+      <id>3</id>
+      <name>Lights Out Of Sync</name>
+      <description>When the lights in NAME stop matching each other</description>
+    </event>
+    <event>
+      <id>4</id>
+      <name>Lights In Sync</name>
+      <description>When the lights in NAME match each other again</description>
+    </event>
+    <event>
+      <id>5</id>
+      <name>Scene Cycle Changed</name>
+      <description>When NAME's scene cycle moves to another scene</description>
+    </event>
+    <event>
+      <id>6</id>
+      <name>Scene Cycle Reached End</name>
+      <description>When NAME's scene cycle reaches its last scene</description>
+    </event>
+  </events>
+  <config>
+    <script file="driver.lua" jit="1"/>
+    <documentation file="www/documentation/index.html"/>
+    <properties>
+      <property>
+        <name>Cloud Settings</name>
+        <type>LABEL</type>
+        <default>Cloud Settings</default>
+      </property>
+      <!-- #ifdef DRIVERCENTRAL -->
+      <property>
+        <name>Cloud Status</name>
+        <type>STRING</type>
+        <default/>
+        <readonly>true</readonly>
+      </property>
+      <!-- #endif -->
+      <property>
+        <name>Automatic Updates</name>
+        <type>LIST</type>
+        <items>
+          <item>Off</item>
+          <item>On</item>
+        </items>
+        <default>On</default>
+      </property>
+      <!-- #ifndef DRIVERCENTRAL -->
+      <property>
+        <name>Update Channel</name>
+        <type>LIST</type>
+        <items>
+          <item>Production</item>
+          <item>Prerelease</item>
+        </items>
+        <default>Production</default>
+      </property>
+      <!-- #endif -->
+      <property>
+        <name>Driver Settings</name>
+        <type>LABEL</type>
+        <default>Driver Settings</default>
+      </property>
+      <property>
+        <name>Driver Status</name>
+        <type>STRING</type>
+        <default/>
+        <readonly>true</readonly>
+      </property>
+      <property>
+        <name>Driver Version</name>
+        <type>STRING</type>
+        <default/>
+        <readonly>true</readonly>
+      </property>
+      <property>
+        <name>Log Level</name>
+        <type>DYNAMIC_LIST</type>
+        <default>3 - Info</default>
+      </property>
+      <property>
+        <name>Log Mode</name>
+        <type>LIST</type>
+        <items>
+          <item>Off</item>
+          <item>Print</item>
+          <item>Log</item>
+          <item>Print and Log</item>
+        </items>
+        <default>Off</default>
+      </property>
+      <!-- #ifdef DRIVERCENTRAL -->
+      <property>
+        <name>Support Code</name>
+        <type>STRING</type>
+        <default/>
+        <description>Enter only a code from support. It opens the Lua window for an hour.</description>
+        <password>true</password>
+      </property>
+      <!-- #endif -->
+      <property>
+        <name>Group Settings</name>
+        <type>LABEL</type>
+        <default>Group Settings</default>
+      </property>
+      <!-- A DEVICE_SELECTOR takes only name, type, items and multiselect. With a <default/> and a
+           <description>, Composer Pro 2026.10.14 let its picker select one device only. -->
+      <property>
+        <name>Lights</name>
+        <type>DEVICE_SELECTOR</type>
+        <items>
+          <item>light_v2.c4i</item>
+        </items>
+        <multiselect>true</multiselect>
+      </property>
+      <property>
+        <name>Group Summary</name>
+        <type>STRING</type>
+        <default/>
+        <readonly>true</readonly>
+      </property>
+      <property>
+        <name>Light Type</name>
+        <type>LIST</type>
+        <items>
+          <item>Automatic</item>
+          <item>On/Off</item>
+          <item>Dimmer</item>
+          <item>Color Temperature</item>
+          <item>Full Color</item>
+        </items>
+        <default>Automatic</default>
+        <description>What the group offers in Navigator. Automatic offers whatever any of its lights can do; another choice limits the group to it.</description>
+      </property>
+      <property>
+        <name>Off Command</name>
+        <type>LIST</type>
+        <items>
+          <item>Brightness 0</item>
+          <item>Off</item>
+        </items>
+        <default>Brightness 0</default>
+        <description>How dimmable lights are turned off. Off suits lights that handle a brightness of 0 badly; it ignores the ramp rate.</description>
+      </property>
+      <property>
+        <name>Command Delay (ms)</name>
+        <type>RANGED_INTEGER</type>
+        <minimum>0</minimum>
+        <maximum>2000</maximum>
+        <default>0</default>
+        <description>Time between the commands to each light, for lighting systems that drop commands sent together. 0 sends them all at once.</description>
+      </property>
+      <property>
+        <name>Feedback Settings</name>
+        <type>LABEL</type>
+        <default>Feedback Settings</default>
+      </property>
+      <property>
+        <name>Keep Lights In Sync</name>
+        <type>LIST</type>
+        <items>
+          <item>Off</item>
+          <item>On</item>
+        </items>
+        <default>Off</default>
+        <description>When one light in the group is changed by itself, the other lights and the group follow it.</description>
+      </property>
+      <property>
+        <name>Brightness Tracking</name>
+        <type>LIST</type>
+        <items>
+          <item>Average</item>
+          <item>Brightest</item>
+          <item>Dimmest</item>
+          <item>Selected Light</item>
+          <item>Ignore</item>
+        </items>
+        <default>Average</default>
+        <description>How the group shows its brightness when its lights differ. Average is of the lights that are on.</description>
+      </property>
+      <property>
+        <name>Color Tracking</name>
+        <type>LIST</type>
+        <items>
+          <item>Average</item>
+          <item>Selected Light</item>
+          <item>Ignore</item>
+        </items>
+        <default>Average</default>
+        <description>How the group shows its color when its lights differ.</description>
+      </property>
+      <property>
+        <name>Tracked Light</name>
+        <type>DEVICE_SELECTOR</type>
+        <items>
+          <item>light_v2.c4i</item>
+        </items>
+        <multiselect>false</multiselect>
+      </property>
+      <property>
+        <name>Feedback Delay (ms)</name>
+        <type>RANGED_INTEGER</type>
+        <minimum>0</minimum>
+        <maximum>30000</maximum>
+        <default>1500</default>
+        <description>How long after the group's own command, and its ramp, the lights are given to settle before their levels are read.</description>
+      </property>
+      <property>
+        <name>Color Temperature Settings</name>
+        <type>LABEL</type>
+        <default>Color Temperature Settings</default>
+      </property>
+      <property>
+        <name>Color Temperature Range</name>
+        <type>LIST</type>
+        <items>
+          <item>Automatic</item>
+          <item>Manual</item>
+        </items>
+        <default>Automatic</default>
+        <description>Automatic spans every light in the group that has color temperature.</description>
+      </property>
+      <property>
+        <name>Minimum Color Temperature (K)</name>
+        <type>RANGED_INTEGER</type>
+        <minimum>1000</minimum>
+        <maximum>20000</maximum>
+        <default>2000</default>
+      </property>
+      <property>
+        <name>Maximum Color Temperature (K)</name>
+        <type>RANGED_INTEGER</type>
+        <minimum>1000</minimum>
+        <maximum>20000</maximum>
+        <default>6500</default>
+      </property>
+      <property>
+        <name>Color Temperature Mapping</name>
+        <type>LIST</type>
+        <items>
+          <item>Closest</item>
+          <item>Scaled</item>
+        </items>
+        <default>Closest</default>
+        <description>What a light is sent when the group's color temperature is outside the light's own range: the closest it has, or the same position on its own range.</description>
+      </property>
+      <property>
+        <name>Emulate Color Temperature</name>
+        <type>LIST</type>
+        <items>
+          <item>Off</item>
+          <item>On</item>
+        </items>
+        <default>On</default>
+        <description>Sends a color light without color temperature the color of the white asked for.</description>
+      </property>
+      <property>
+        <name>Scene Cycle Settings</name>
+        <type>LABEL</type>
+        <default>Scene Cycle Settings</default>
+      </property>
+      <property>
+        <name>Scenes In Cycle</name>
+        <type>LIST</type>
+        <items>
+          <item>Any Of These Lights</item>
+          <item>Only These Lights</item>
+        </items>
+        <default>Any Of These Lights</default>
+        <description>Which Advanced Lighting Scenes the cycle offers: every scene with one of the group's lights, or only scenes with no other lights.</description>
+      </property>
+      <property>
+        <name>Skip Toggle Scenes</name>
+        <type>LIST</type>
+        <items>
+          <item>No</item>
+          <item>Yes</item>
+        </items>
+        <default>Yes</default>
+        <description>Leaves out the (Toggle) scenes Composer makes.</description>
+      </property>
+      <property>
+        <name>Track Current Scene</name>
+        <type>LIST</type>
+        <items>
+          <item>Off</item>
+          <item>Match Light Levels</item>
+        </items>
+        <default>Match Light Levels</default>
+        <description>Follows the lights: the scene they match is the current one, however it was activated, and none is once they stop matching.</description>
+      </property>
+      <property>
+        <name>Cycle Off Step</name>
+        <type>LIST</type>
+        <items>
+          <item>Off</item>
+          <item>On</item>
+        </items>
+        <default>Off</default>
+        <description>Adds a last step that turns the group off.</description>
+      </property>
+      <property>
+        <name>Cycle Mode</name>
+        <type>LIST</type>
+        <items>
+          <item>Wrap Around</item>
+          <item>Back And Forth</item>
+        </items>
+        <default>Wrap Around</default>
+        <description>After the last scene, the first again, or back down through them.</description>
+      </property>
+      <property>
+        <name>Cycle Restart After (s)</name>
+        <type>RANGED_INTEGER</type>
+        <minimum>0</minimum>
+        <maximum>86400</maximum>
+        <default>0</default>
+        <description>After this long without a step, the next step is the first scene. 0 never restarts.</description>
+      </property>
+      <property>
+        <name>Cycle Hold Action</name>
+        <type>LIST</type>
+        <items>
+          <item>None</item>
+          <item>Previous Scene</item>
+          <item>Off</item>
+          <item>Restart Cycle</item>
+        </items>
+        <default>None</default>
+        <description>What holding the cycle's button does.</description>
+      </property>
+    </properties>
+    <tabs>
+      <tab name="Settings" file="html/index.html"/>
+    </tabs>
+    <actions>
+      <!-- #ifndef DRIVERCENTRAL -->
+      <action>
+        <name>Update Drivers</name>
+        <command>Update_Drivers</command>
+      </action>
+      <!-- #endif -->
+      <action>
+        <name>Display Lights</name>
+        <command>Display_Lights</command>
+      </action>
+      <action>
+        <name>Display Control Log</name>
+        <command>Display_Control_Log</command>
+      </action>
+      <action>
+        <name>Test Light Commands</name>
+        <command>Test_Light_Commands</command>
+      </action>
+      <action>
+        <name>Sync Lights</name>
+        <command>Sync_Lights</command>
+      </action>
+    </actions>
+    <commands>
+      <command>
+        <name>Next Scene</name>
+        <description>Step NAME to its next scene</description>
+      </command>
+      <command>
+        <name>Previous Scene</name>
+        <description>Step NAME to its previous scene</description>
+      </command>
+      <command>
+        <name>Go To Scene</name>
+        <description>Set NAME to scene PARAM1</description>
+        <params>
+          <param>
+            <name>Scene</name>
+            <type>DYNAMIC_LIST</type>
+          </param>
+        </params>
+      </command>
+      <command>
+        <name>Restart Scene Cycle</name>
+        <description>Restart the scene cycle of NAME</description>
+      </command>
+      <command>
+        <name>Sync Lights</name>
+        <description>Sync the lights in NAME to the group</description>
+      </command>
+    </commands>
+  </config>
+  <!-- Dimming is declared True so Composer's test panel, which needs the static AND the
+       dynamic value, works for a group that dims; the color tier is left False and told
+       dynamically. The driver tells the proxy what the group's lights can really do. -->
+  <capabilities>
+    <dimmer>True</dimmer>
+    <set_level>True</set_level>
+    <supports_target>True</supports_target>
+    <supports_brightness_stop>True</supports_brightness_stop>
+    <!--
+      Deprecated in 3.3.2, but Composer's test panel still gates on them: the
+      On/Off buttons, the Ramp button, and the Default On preset editor.
+    -->
+    <on_off>True</on_off>
+    <ramp_level>True</ramp_level>
+    <supports_default_on>True</supports_default_on>
+    <!-- True would mean the light's ramp rate cannot be changed. -->
+    <has_fixed_ramp_rate>False</has_fixed_ramp_rate>
+    <fixed_ramp_rate>0</fixed_ramp_rate>
+    <hide_proxy_properties>False</hide_proxy_properties>
+    <hide_proxy_events>False</hide_proxy_events>
+    <click_rates>True</click_rates>
+    <hold_rates>True</hold_rates>
+    <cold_start>False</cold_start>
+    <has_leds>True</has_leds>
+    <has_button_events>True</has_button_events>
+    <supports_broadcast_scenes>False</supports_broadcast_scenes>
+    <supports_multichannel_scenes>False</supports_multichannel_scenes>
+    <reduced_als_support>False</reduced_als_support>
+    <advanced_scene_support>True</advanced_scene_support>
+    <load_group_support>False</load_group_support>
+    <brightness_on_mode_preset>True</brightness_on_mode_preset>
+    <brightness_on_mode_previous>True</brightness_on_mode_previous>
+    <color_on_mode_fade>True</color_on_mode_fade>
+    <color_on_mode_preset>True</color_on_mode_preset>
+    <color_on_mode_previous>True</color_on_mode_previous>
+    <multi_click>False</multi_click>
+    <has_extras>False</has_extras>
+    <disable_flash>False</disable_flash>
+    <brightness_rate_min>0</brightness_rate_min>
+    <!-- As the driver tells it: a fade past 65.5 s runs in legs. -->
+    <brightness_rate_max>86400000</brightness_rate_max>
+    <!--
+      Not light_v2 capabilities; the proxy ignores both and still seeds its own
+      750 ms rate. Declared because Composer reads this list directly and may
+      seed its own rate control from it.
+    -->
+    <brightness_rate_default>0</brightness_rate_default>
+    <click_rate_min>0</click_rate_min>
+    <click_rate_max>65535</click_rate_max>
+    <hold_rate_min>1000</hold_rate_min>
+    <hold_rate_max>86400000</hold_rate_max>
+    <supports_color>False</supports_color>
+    <supports_color_correlated_temperature>False</supports_color_correlated_temperature>
+    <!-- The proxy passes SET_BRIGHTNESS_STOP on only to a light with this True. -->
+    <supports_color_stop>True</supports_color_stop>
+    <color_correlated_temperature_min>2000</color_correlated_temperature_min>
+    <color_correlated_temperature_max>6500</color_correlated_temperature_max>
+    <color_rate_behavior>1</color_rate_behavior>
+    <color_rate_min>0</color_rate_min>
+    <color_rate_max>86400000</color_rate_max>
+    <color_rate_default>0</color_rate_default>
+  </capabilities>
+  <proxies>
+    <proxy proxybindingid="5001" primary="True" name="Light Group">light_v2</proxy>
+  </proxies>
+  <connections>
+    <connection>
+      <id>300</id>
+      <facing>6</facing>
+      <connectionname>On Button Link</connectionname>
+      <type>1</type>
+      <consumer>False</consumer>
+      <audiosource>False</audiosource>
+      <videosource>False</videosource>
+      <linelevel>True</linelevel>
+      <classes>
+        <class>
+          <classname>BUTTON_LINK</classname>
+        </class>
+      </classes>
+    </connection>
+    <connection>
+      <id>301</id>
+      <facing>6</facing>
+      <connectionname>Toggle Button Link</connectionname>
+      <type>1</type>
+      <consumer>False</consumer>
+      <audiosource>False</audiosource>
+      <videosource>False</videosource>
+      <linelevel>True</linelevel>
+      <classes>
+        <class>
+          <classname>BUTTON_LINK</classname>
+        </class>
+      </classes>
+    </connection>
+    <connection>
+      <id>302</id>
+      <facing>6</facing>
+      <connectionname>Off Button Link</connectionname>
+      <type>1</type>
+      <consumer>False</consumer>
+      <audiosource>False</audiosource>
+      <videosource>False</videosource>
+      <linelevel>True</linelevel>
+      <classes>
+        <class>
+          <classname>BUTTON_LINK</classname>
+        </class>
+      </classes>
+    </connection>
+    <connection>
+      <id>303</id>
+      <facing>6</facing>
+      <connectionname>Scene Cycle Button Link</connectionname>
+      <type>1</type>
+      <consumer>False</consumer>
+      <audiosource>False</audiosource>
+      <videosource>False</videosource>
+      <linelevel>True</linelevel>
+      <classes>
+        <class>
+          <classname>BUTTON_LINK</classname>
+        </class>
+      </classes>
+    </connection>
+    <connection>
+      <id>5001</id>
+      <facing>6</facing>
+      <connectionname>Light</connectionname>
+      <type>2</type>
+      <consumer>False</consumer>
+      <audiosource>False</audiosource>
+      <videosource>False</videosource>
+      <linelevel>False</linelevel>
+      <classes>
+        <class>
+          <classname>LIGHT_V2</classname>
+        </class>
+      </classes>
+    </connection>
+  </connections>
+</devicedata>

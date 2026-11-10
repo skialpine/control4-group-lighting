@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Light Group</title>
+<style>
+<!-- #embed ../../../../src/lib/ui/style.css -->
+
+h2 { font-size: 16px; font-weight: 600; }
+.sub { color: var(--text-muted); margin-bottom: 12px; }
+.head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.head h3 { margin: 0; }
+.head .count { color: var(--text-muted); font-size: 12px; }
+.head .spacer { flex: 1; }
+.title { font-size: 16px; font-weight: 600; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 24px; margin-top: 10px; }
+.facts dt { color: var(--text-muted); }
+.swatch { display: inline-block; width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--border); margin-right: 5px; vertical-align: -1px; }
+
+table.rows { width: 100%; border-collapse: collapse; }
+table.rows th { text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); padding: 6px 8px; border-top: 1px solid var(--border); border-bottom: 1px dashed var(--border); }
+table.rows td { padding: 8px; border-bottom: 1px dashed var(--border); vertical-align: middle; }
+table.rows tr:last-child td { border-bottom: none; }
+table.rows td.state, table.rows th.state { border-left: 1px solid var(--border); padding-left: 14px; white-space: nowrap; }
+table.rows .name { font-weight: 600; }
+table.rows .hint { color: var(--text-muted); font-size: 12px; }
+table.rows tr.section td { font-size: 11px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); padding-top: 16px; border-bottom: 1px solid var(--border); }
+table.rows td.value { width: 46%; }
+table.rows td.value input, table.rows td.value select, .field {
+  width: 100%; padding: 6px 8px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); font-size: 13px; font-family: var(--font);
+}
+table.rows td.value input:focus, table.rows td.value select:focus, .field:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15); }
+table.rows td.value .readonly { color: var(--text-muted); }
+table.rows td.value .error { color: var(--danger); font-size: 11px; margin-top: 3px; }
+
+.dot { font-weight: 600; white-space: nowrap; }
+.dot::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; margin-right: 7px; vertical-align: 1px; }
+.dot.good { color: var(--success); }
+.dot.warn { color: var(--warning); }
+.dot.none { color: var(--text-muted); }
+
+.room { margin-top: 12px; }
+.room:first-child { margin-top: 0; }
+.room > label { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); padding: 4px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; padding: 6px 0 0 2px; }
+.pick label { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: var(--radius); cursor: pointer; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pick label:hover { background: var(--surface-hover); }
+.empty { color: var(--text-muted); padding: 8px 0; }
+pre.out { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; margin-top: 10px; }
+.btn[disabled] { opacity: 0.5; cursor: default; }
+table.rows td.tight { width: 1%; white-space: nowrap; }
+table.rows tr.left-out .name { color: var(--text-muted); font-weight: 500; }
+.dot.now { color: var(--accent); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+</style>
+</head>
+<body>
+<div class="nav">
+  <div class="nav-tab active" data-panel="group">Group</div>
+  <div class="nav-tab" data-panel="lights">Lights</div>
+  <div class="nav-tab" data-panel="scenes">Scenes</div>
+  <div class="nav-tab" data-panel="settings">Settings</div>
+</div>
+<div class="banner warn" id="conn-warn" hidden>Not connected to the controller. Open this tab from Composer. The values shown are examples.</div>
+
+<div class="panel active" id="panel-group">
+  <h2>Group</h2>
+  <div class="sub">What the group shows and what each of its lights is doing.</div>
+  <div class="card">
+    <div class="head">
+      <div class="title" id="g-name">Light Group</div>
+      <div class="spacer"></div>
+      <span class="kit-pill pending" id="g-pill">Loading</span>
+    </div>
+    <dl class="facts" id="g-facts"></dl>
+  </div>
+  <div class="card">
+    <div class="head"><h3>Lights</h3><span class="count" id="g-count"></span></div>
+    <div id="g-lights"></div>
+  </div>
+  <div class="card">
+    <div class="head"><h3>Actions</h3></div>
+    <div class="actions">
+      <button class="btn btn-outline" id="a-sync">Sync lights</button>
+      <button class="btn btn-outline" id="a-test">Test light commands</button>
+      <button class="btn btn-outline" id="a-log">Show control log</button>
+    </div>
+    <pre class="out" id="a-out" hidden></pre>
+  </div>
+</div>
+
+<div class="panel" id="panel-lights">
+  <h2>Lights</h2>
+  <div class="sub">Check the lights this group controls. Any light in the project can be in it, from any manufacturer.</div>
+  <div class="card">
+    <div class="head">
+      <h3>Lights</h3><span class="count" id="p-count"></span>
+      <div class="spacer"></div>
+      <input class="field" id="p-filter" type="search" placeholder="Filter" style="width: 160px">
+      <button class="btn btn-outline" id="p-discard" disabled>Discard changes</button>
+      <button class="btn btn-primary" id="p-save" disabled>Save</button>
+    </div>
+    <div id="p-list"></div>
+  </div>
+  <div class="card">
+    <div class="head"><h3>Tracked light</h3></div>
+    <div class="sub" style="margin-bottom: 8px">The light the group follows when Brightness Tracking or Color Tracking is Selected Light.</div>
+    <select class="field" id="p-tracked" style="max-width: 320px"></select>
+  </div>
+</div>
+
+<div class="panel" id="panel-scenes">
+  <h2>Scenes</h2>
+  <div class="sub">The scene cycle steps through the Advanced Lighting Scenes that use this group's lights, from the Scene Cycle Button Link, programming or here.</div>
+  <div class="card">
+    <div class="head">
+      <h3>Scene cycle</h3><span class="count" id="c-count"></span>
+      <div class="spacer"></div>
+      <button class="btn btn-outline" id="c-previous">Previous</button>
+      <button class="btn btn-primary" id="c-next">Next</button>
+      <button class="btn btn-outline" id="c-restart">Restart</button>
+    </div>
+    <div id="c-list"></div>
+  </div>
+  <div class="card">
+    <div class="head">
+      <h3>Scenes on the controller</h3><span class="count" id="c-read"></span>
+      <div class="spacer"></div>
+      <button class="btn btn-outline" id="c-refresh">Read scenes again</button>
+    </div>
+    <div class="sub" style="margin-bottom: 0">The scenes are read from the controller each time this tab is opened. After adding or changing a scene in Composer, open this tab or read them again. Which scenes are offered is set by Scenes In Cycle on the Settings view.</div>
+  </div>
+</div>
+
+<div class="panel" id="panel-settings">
+  <h2>Settings</h2>
+  <div class="sub">The driver's properties, the same as on the Properties tab. A change made on either shows on both.</div>
+  <div class="card">
+    <div class="head"><h3>Settings</h3><span class="count" id="s-count"></span></div>
+    <table class="rows" id="s-table"></table>
+  </div>
+</div>
+
+<script>
+<!-- #embed ../../../../src/lib/ui/page.js -->
+
+var esc = Kit.esc;
+var group = null; // The driver's last GROUP_DATA.
+var properties = []; // The driver's last CONFIG_DATA.
+var propertyErrors = {};
+var picked = null; // The picker's checked ids while they differ from the group's, else null.
+
+function byId(id) {
+  return document.getElementById(id);
+}
+
+// A white's rough screen color, for its swatch.
+function kelvinColor(k) {
+  var t = Math.max(1000, Math.min(12000, k)) / 100;
+  var r = t <= 66 ? 255 : 329.7 * Math.pow(t - 60, -0.1332);
+  var g = t <= 66 ? 99.47 * Math.log(t) - 161.12 : 288.12 * Math.pow(t - 60, -0.0755);
+  var b = t >= 66 ? 255 : t <= 19 ? 0 : 138.52 * Math.log(t - 10) - 305.04;
+  function c(v) {
+    return Math.round(Math.max(0, Math.min(255, v)));
+  }
+  return "rgb(" + c(r) + "," + c(g) + "," + c(b) + ")";
+}
+
+function colorText(item) {
+  if (item.kelvin) return '<span class="swatch" style="background:' + kelvinColor(item.kelvin) + '"></span>' + esc(item.kelvin) + " K";
+  if (item.x !== undefined && item.x !== null) return "xy " + Number(item.x).toFixed(3) + ", " + Number(item.y).toFixed(3);
+  return "-";
+}
+
+function levelText(level) {
+  if (level === undefined || level === null) return "-";
+  return level > 0 ? esc(level) + "%" : "Off";
+}
+
+function abilityText(item) {
+  var can = [item.dimmable || item.dims ? "Dimming" : "On/off"];
+  if (item.color) can.push("Color");
+  if (item.cct) can.push("Color temperature" + (item.minKelvin && item.maxKelvin ? " " + item.minKelvin + "-" + item.maxKelvin + " K" : ""));
+  return can.join(", ");
+}
+
+function renderGroup() {
+  if (!group) return;
+  byId("g-name").textContent = group.name || "Light Group";
+  var pill = byId("g-pill");
+  var online = group.total > 0;
+  pill.className = "kit-pill " + (online ? (group.inSync ? "online" : "pending") : "offline");
+  pill.textContent = online ? (group.inSync ? "In sync" : "Out of sync") : "No lights selected";
+  var facts = [
+    ["Status", esc(group.status || "")],
+    ["Lights on", esc(group.on) + " of " + esc(group.total)],
+    ["Level", levelText(group.level)],
+  ];
+  if (group.color || group.cct) facts.push(["Color", colorText(group)]);
+  facts.push(["Offers", esc(abilityText(group))]);
+  byId("g-facts").innerHTML = facts
+    .map(function (f) {
+      return "<dt>" + f[0] + "</dt><dd>" + f[1] + "</dd>";
+    })
+    .join("");
+
+  byId("g-count").textContent = group.total + " in this group";
+  var lights = group.lights || [];
+  if (!lights.length) {
+    byId("g-lights").innerHTML = '<div class="empty">No lights yet. Pick them on the Lights tab.</div>';
+    return;
+  }
+  byId("g-lights").innerHTML =
+    '<table class="rows"><tr><th>Light</th><th>Level</th><th>Color</th><th class="state">State</th></tr>' +
+    lights
+      .map(function (l) {
+        var state, cls;
+        if (l.level === undefined || l.level === null) {
+          state = "not reported";
+          cls = "none";
+        } else if (l.level > 0 === group.level > 0 && (!l.dimmable || l.level === 0 || Math.abs(l.level - group.level) <= 1)) {
+          state = "in step";
+          cls = "good";
+        } else {
+          state = "differs";
+          cls = "warn";
+        }
+        return (
+          '<tr><td><div class="name">' + esc(l.name) + '</div><div class="hint">' + esc(abilityText(l)) + "</div></td>" +
+          "<td>" + levelText(l.level) + "</td><td>" + colorText(l) + "</td>" +
+          '<td class="state"><span class="dot ' + cls + '">' + state + "</span></td></tr>"
+        );
+      })
+      .join("") +
+    "</table>";
+}
+
+// ── The picker ──────────────────────────────────────────────────────────────
+
+function memberIds() {
+  return ((group && group.lights) || []).map(function (l) {
+    return l.id;
+  });
+}
+
+function checkedIds() {
+  return picked || memberIds();
+}
+
+function renderPicker() {
+  if (!group) return;
+  var checked = {};
+  checkedIds().forEach(function (id) {
+    checked[id] = true;
+  });
+  var filter = byId("p-filter").value.trim().toLowerCase();
+  var rooms = [];
+  (group.available || []).forEach(function (l) {
+    if (filter && (l.name + " " + l.room).toLowerCase().indexOf(filter) < 0) return;
+    var room = rooms[rooms.length - 1];
+    if (!room || room.name !== l.room) rooms.push((room = { name: l.room, lights: [] }));
+    room.lights.push(l);
+  });
+  byId("p-count").textContent = checkedIds().length + " selected";
+  byId("p-save").disabled = byId("p-discard").disabled = !picked;
+  if (!rooms.length) {
+    byId("p-list").innerHTML = '<div class="empty">' + (filter ? "No light matches." : "The project has no other lights.") + "</div>";
+  } else {
+    byId("p-list").innerHTML = rooms
+      .map(function (room, i) {
+        var all = room.lights.every(function (l) {
+          return checked[l.id];
+        });
+        return (
+          '<div class="room"><label><input type="checkbox" data-room="' + i + '"' + (all ? " checked" : "") + ">" + esc(room.name || "No room") + "</label>" +
+          '<div class="pick">' +
+          room.lights
+            .map(function (l) {
+              return '<label title="' + esc(l.name) + '"><input type="checkbox" data-id="' + esc(l.id) + '"' + (checked[l.id] ? " checked" : "") + ">" + esc(l.name) + "</label>";
+            })
+            .join("") +
+          "</div></div>"
+        );
+      })
+      .join("");
+  }
+  byId("p-list")._rooms = rooms;
+
+  var tracked = byId("p-tracked");
+  if (document.activeElement !== tracked) {
+    tracked.innerHTML =
+      '<option value="">None</option>' +
+      (group.lights || [])
+        .map(function (l) {
+          return '<option value="' + esc(l.id) + '"' + (l.id === group.trackedId ? " selected" : "") + ">" + esc(l.name) + "</option>";
+        })
+        .join("");
+  }
+}
+
+function setPicked(ids) {
+  var now = ids.slice().sort().join(",");
+  picked = now === memberIds().slice().sort().join(",") ? null : ids;
+  renderPicker();
+}
+
+byId("p-list").addEventListener("change", function (e) {
+  var ids = checkedIds().slice();
+  function set(id, on) {
+    var at = ids.indexOf(id);
+    if (on && at < 0) ids.push(id);
+    if (!on && at >= 0) ids.splice(at, 1);
+  }
+  if (e.target.dataset.id) {
+    set(Number(e.target.dataset.id), e.target.checked);
+  } else if (e.target.dataset.room) {
+    byId("p-list")._rooms[Number(e.target.dataset.room)].lights.forEach(function (l) {
+      set(l.id, e.target.checked);
+    });
+  }
+  setPicked(ids);
+});
+byId("p-filter").addEventListener("input", renderPicker);
+byId("p-discard").addEventListener("click", function () {
+  picked = null;
+  renderPicker();
+});
+byId("p-save").addEventListener("click", function () {
+  if (!picked) return;
+  Kit.sendCommand("SET_LIGHTS", { ids: picked });
+  byId("p-save").disabled = true;
+});
+byId("p-tracked").addEventListener("change", function (e) {
+  Kit.sendCommand("SET_TRACKED_LIGHT", { id: e.target.value ? Number(e.target.value) : null });
+  e.target.blur();
+});
+
+// ── The scene cycle ─────────────────────────────────────────────────────────
+
+var readingScenes = false;
+
+function cycleScenes() {
+  return (group && group.cycle && group.cycle.scenes) || [];
+}
+
+function renderScenes() {
+  if (!group || !group.cycle) return;
+  var scenes = cycleScenes();
+  var current = group.cycle.current || {};
+  var included = scenes.filter(function (s) {
+    return s.included;
+  });
+  byId("c-count").textContent = included.length + " in the cycle" + (current.name ? ", now " + current.name : "");
+  byId("c-next").disabled = byId("c-previous").disabled = !included.length;
+  var read = group.cycle.read ? new Date(group.cycle.read * 1000).toLocaleString() : "";
+  byId("c-read").textContent = readingScenes ? "Reading..." : group.cycle.known + " read" + (read ? ", " + read : "");
+  if (!scenes.length) {
+    byId("c-list").innerHTML =
+      '<div class="empty">' +
+      (group.cycle.known ? "No scene uses this group's lights. Add the group or one of its lights to a scene in Composer." : "No scenes have been read from the controller yet.") +
+      "</div>";
+    return;
+  }
+  byId("c-list").innerHTML =
+    '<table class="rows"><tr><th class="tight">In cycle</th><th>Scene</th><th class="tight">Order</th><th class="tight"></th><th class="state">State</th></tr>' +
+    scenes
+      .map(function (s, i) {
+        var now = current.id === s.id;
+        return (
+          "<tr" + (s.included ? "" : ' class="left-out"') + ">" +
+          '<td class="tight"><input type="checkbox" data-include="' + esc(s.id) + '"' + (s.included ? " checked" : "") + "></td>" +
+          '<td><div class="name">' + esc(s.name) + "</div>" + (s.others ? '<div class="hint">Also changes lights outside this group</div>' : "") + "</td>" +
+          '<td class="tight"><button class="btn btn-outline btn-sm" data-move="' + i + '" data-by="-1"' + (i === 0 ? " disabled" : "") + ">Up</button> " +
+          '<button class="btn btn-outline btn-sm" data-move="' + i + '" data-by="1"' + (i === scenes.length - 1 ? " disabled" : "") + ">Down</button></td>" +
+          '<td class="tight"><button class="btn btn-outline btn-sm" data-go="' + esc(s.id) + '"' + (s.included ? "" : " disabled") + ">Activate</button></td>" +
+          '<td class="state"><span class="dot ' + (now ? "now" : "none") + '">' + (now ? "current" : s.included ? "in cycle" : "left out") + "</span></td></tr>"
+        );
+      })
+      .join("") +
+    (current.off ? '<tr><td></td><td><div class="name">Off</div></td><td></td><td></td><td class="state"><span class="dot now">current</span></td></tr>' : "") +
+    "</table>";
+}
+
+function sendCycle(scenes) {
+  Kit.sendCommand("SET_CYCLE", {
+    order: scenes.map(function (s) {
+      return s.id;
+    }),
+    excluded: scenes
+      .filter(function (s) {
+        return !s.included;
+      })
+      .map(function (s) {
+        return s.id;
+      }),
+  });
+  renderScenes();
+}
+
+byId("c-list").addEventListener("click", function (e) {
+  var data = e.target.dataset;
+  var scenes = cycleScenes();
+  if (data.go) {
+    Kit.sendCommand("RUN_ACTION", { action: "scene", scene: Number(data.go) });
+  } else if (data.move) {
+    var from = Number(data.move);
+    var to = from + Number(data.by);
+    if (to < 0 || to >= scenes.length) return;
+    scenes.splice(to, 0, scenes.splice(from, 1)[0]);
+    sendCycle(scenes);
+  }
+});
+byId("c-list").addEventListener("change", function (e) {
+  if (!e.target.dataset.include) return;
+  var id = Number(e.target.dataset.include);
+  cycleScenes().forEach(function (s) {
+    if (s.id === id) s.included = e.target.checked;
+  });
+  sendCycle(cycleScenes());
+});
+["next", "previous", "restart"].forEach(function (action) {
+  byId("c-" + action).addEventListener("click", function () {
+    Kit.sendCommand("RUN_ACTION", { action: action });
+  });
+});
+
+// A driver cannot ask the controller for its scenes, and this page can: every scene, then each one's lights.
+function readScenes() {
+  if (!Kit.apiHost || readingScenes) return;
+  readingScenes = true;
+  renderScenes();
+  var agentId = null;
+  Kit.api("GET", "/api/v1/items?query=" + encodeURIComponent('{"type":9}'))
+    .then(function (agents) {
+      (Array.isArray(agents) ? agents : []).forEach(function (a) {
+        if (a.filename === "control4_agent_adv_lighting.c4i") agentId = a.id;
+      });
+      return Kit.api("GET", "/api/v1/agents/advanced_lighting");
+    })
+    .then(function (list) {
+      if (!Array.isArray(list)) return null;
+      return Promise.all(
+        list.map(function (scene) {
+          return Kit.api("GET", "/api/v1/agents/advanced_lighting/" + scene.scene_id).then(function (detail) {
+            var members = detail && detail.all_members ? detail.all_members.AdvSceneMember : [];
+            members = Array.isArray(members) ? members : members ? [members] : [];
+            // Where the scene leaves each light: its last element's level and color.
+            var targets = {};
+            members.forEach(function (m) {
+              var elements = m.all_elements ? m.all_elements.element : [];
+              elements = Array.isArray(elements) ? elements : elements ? [elements] : [];
+              var last = elements[elements.length - 1];
+              if (!last) return;
+              var target = {};
+              if (last.levelEnabled) target.level = last.level;
+              if (last.colorEnabled && last.colorMode === 1) target.kelvin = last.colorTemperature;
+              else if (last.colorEnabled) {
+                target.x = last.colorX;
+                target.y = last.colorY;
+              }
+              targets[m.device_id] = target;
+            });
+            return {
+              id: scene.scene_id,
+              name: scene.name,
+              members: members.map(function (m) {
+                return m.device_id;
+              }),
+              targets: targets,
+            };
+          });
+        })
+      );
+    })
+    .then(function (scenes) {
+      readingScenes = false;
+      if (scenes) Kit.sendCommand("SET_SCENES", { agentId: agentId, scenes: scenes });
+      renderScenes();
+    });
+}
+byId("c-refresh").addEventListener("click", readScenes);
+
+// ── Settings ────────────────────────────────────────────────────────────────
+
+function propertyValue(name) {
+  for (var i = 0; i < properties.length; i++) if (properties[i].name === name) return properties[i].value;
+}
+
+// Shown only while the range is set by hand, as on the Properties tab.
+function hiddenProperty(p) {
+  return /Color Temperature \(K\)$/.test(p.name) && propertyValue("Color Temperature Range") !== "Manual";
+}
+
+function settingControl(p, i) {
+  var attrs = ' id="set-' + i + '" data-prop="' + esc(p.name) + '"';
+  if (p.readonly) return '<span class="readonly">' + (esc(p.value) || "-") + "</span>";
+  if (p.choices) {
+    return (
+      "<select" + attrs + ">" +
+      p.choices
+        .map(function (c) {
+          return "<option" + (c === p.value ? " selected" : "") + ">" + esc(c) + "</option>";
+        })
+        .join("") +
+      "</select>"
+    );
+  }
+  if (p.minimum !== undefined) return '<input type="number"' + attrs + ' min="' + esc(p.minimum) + '" max="' + esc(p.maximum) + '" step="1" value="' + esc(p.value) + '">';
+  return '<input type="text"' + attrs + ' value="' + esc(p.value) + '">';
+}
+
+function renderSettings() {
+  var table = byId("s-table");
+  // A push must not swap a control out from under the one being edited; the next push catches up.
+  if (table.contains(document.activeElement) && document.activeElement !== document.body) return;
+  var rows = [];
+  var section = null;
+  var shown = 0;
+  properties.forEach(function (p, i) {
+    if (hiddenProperty(p)) return;
+    if (p.group !== section) {
+      section = p.group;
+      rows.push('<tr class="section"><td colspan="2">' + esc(section) + "</td></tr>");
+    }
+    shown++;
+    var range = p.minimum !== undefined && !p.readonly ? p.minimum + " to " + p.maximum : "";
+    var hint = [range, p.description].filter(Boolean).join(". ");
+    rows.push(
+      '<tr><td><div class="name">' + esc(p.name) + "</div>" + (hint ? '<div class="hint">' + esc(hint) + "</div>" : "") + "</td>" +
+        '<td class="value">' + settingControl(p, i) + (propertyErrors[p.name] ? '<div class="error">' + esc(propertyErrors[p.name]) + "</div>" : "") + "</td></tr>"
+    );
+  });
+  byId("s-count").textContent = shown + " on this driver";
+  table.innerHTML = "<tr><th>Setting</th><th>Value</th></tr>" + rows.join("");
+}
+
+byId("s-table").addEventListener("change", function (e) {
+  var name = e.target.dataset.prop;
+  if (!name) return;
+  delete propertyErrors[name];
+  var value = e.target.value;
+  e.target.blur();
+  for (var i = 0; i < properties.length; i++) if (properties[i].name === name) properties[i].value = value;
+  Kit.sendCommand("_SET_PROPERTY", { property: name, value: value });
+  renderSettings();
+});
+
+// ── Actions ─────────────────────────────────────────────────────────────────
+
+function showOutput(text) {
+  var out = byId("a-out");
+  out.hidden = false;
+  out.textContent = text;
+}
+
+byId("a-sync").addEventListener("click", function () {
+  Kit.sendCommand("RUN_ACTION", { action: "sync" });
+  showOutput("Sent every light the group's level and color.");
+});
+byId("a-test").addEventListener("click", function () {
+  showOutput("");
+  Kit.sendCommand("RUN_ACTION", { action: "test" });
+});
+byId("a-log").addEventListener("click", function () {
+  var lines = (group && group.log) || [];
+  showOutput(lines.length ? lines.join("\n") : "No commands sent yet.");
+});
+
+// ── The driver ──────────────────────────────────────────────────────────────
+
+var handlers = {
+  GROUP_DATA: function (params) {
+    try {
+      group = JSON.parse(params.payload);
+    } catch (e) {
+      return;
+    }
+    // A save that has landed is no longer a pending change.
+    if (picked && picked.slice().sort().join(",") === memberIds().slice().sort().join(",")) picked = null;
+    renderGroup();
+    renderPicker();
+    renderScenes();
+  },
+  CONFIG_DATA: function (params) {
+    try {
+      properties = JSON.parse(params.properties) || [];
+    } catch (e) {
+      properties = [];
+    }
+    renderSettings();
+  },
+  PROPERTY_ERROR: function (params) {
+    try {
+      var refused = JSON.parse(params.payload);
+      propertyErrors[refused.property] = refused.error;
+    } catch (e) {}
+    renderSettings();
+  },
+  TEST_LINE: function (params) {
+    var out = byId("a-out");
+    out.hidden = false;
+    out.textContent += (out.textContent ? "\n" : "") + Kit.str(params.line);
+  },
+};
+
+Kit.initTabs();
+Kit.demoMode(function (command, params) {
+  if (command === "_GET_CONFIG") {
+    Kit.deliver("CONFIG_DATA", {
+      properties: JSON.stringify([
+        { name: "Driver Status", group: "Driver Settings", readonly: true, value: "Online" },
+        { name: "Driver Version", group: "Driver Settings", readonly: true, value: "20261110" },
+        { name: "Log Level", group: "Driver Settings", value: "3 - Info", choices: ["2 - Warning", "3 - Info", "4 - Debug"] },
+        { name: "Light Type", group: "Group Settings", value: "Automatic", choices: ["Automatic", "On/Off", "Dimmer", "Color Temperature", "Full Color"], description: "What the group offers in Navigator." },
+        { name: "Command Delay (ms)", group: "Group Settings", value: "0", minimum: 0, maximum: 2000 },
+        { name: "Keep Lights In Sync", group: "Feedback Settings", value: "On", choices: ["Off", "On"] },
+        { name: "Color Temperature Range", group: "Color Temperature Settings", value: "Automatic", choices: ["Automatic", "Manual"] },
+      ]),
+    });
+    Kit.deliver("GROUP_DATA", {
+      payload: JSON.stringify({
+        name: "Office Lights", status: "Online", total: 3, on: 3, inSync: false, level: 74, kelvin: 3200,
+        dims: true, color: false, cct: true, minKelvin: 2203, maxKelvin: 6536, trackedId: null,
+        lights: [
+          { id: 1, name: "Left", dimmable: true, cct: true, minKelvin: 2203, maxKelvin: 6536, level: 74, kelvin: 3200 },
+          { id: 2, name: "Center", dimmable: true, cct: true, minKelvin: 2203, maxKelvin: 6536, level: 74, kelvin: 3200 },
+          { id: 3, name: "Right", dimmable: true, cct: true, minKelvin: 2203, maxKelvin: 6536, level: 23, kelvin: 2240 },
+        ],
+        available: [
+          { id: 1, name: "Left", room: "Office" }, { id: 2, name: "Center", room: "Office" }, { id: 3, name: "Right", room: "Office" },
+          { id: 4, name: "Stairs", room: "Living Room" }, { id: 5, name: "Fireplace", room: "Living Room" },
+        ],
+        log: ["2026-11-10 13:15:22  Left [1]  RAMP_TO_LEVEL LEVEL=74 TIME=750"],
+        cycle: {
+          known: 18, read: 1794340000, current: { position: 2, id: 21, name: "Office Relax", off: false },
+          scenes: [
+            { id: 20, name: "Office Bright", included: true, others: false },
+            { id: 21, name: "Office Relax", included: true, others: false },
+            { id: 22, name: "Movie Night", included: false, others: true },
+          ],
+        },
+      }),
+    });
+  }
+});
+Kit.connectDriver({
+  handlers: handlers,
+  onProperty: function (name, value) {
+    for (var i = 0; i < properties.length; i++) if (properties[i].name === name) properties[i].value = value;
+    renderSettings();
+  },
+  onConnect: function () {
+    Kit.sendCommand("_GET_CONFIG");
+    readScenes();
+  },
+});
+if (!Kit.apiHost) Kit.sendCommand("_GET_CONFIG");
+</script>
+</body>
+</html>

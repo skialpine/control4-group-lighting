@@ -1,0 +1,24 @@
+control4-group-lighting
+Licensed under the GNU Affero General Public License v3 (see LICENSE).
+
+This project is not affiliated with or endorsed by Control4, Snap One, Chowmain
+Software or Finite Labs. Product names are used only to describe compatibility.
+
+-------------------------------------------------------------------------------
+
+control4-driver-template
+https://github.com/finitelabs/control4-driver-template (v0.9.88)
+
+The build tooling, src/lib, test harness and vendored libraries come from the
+Finite Labs driver template. Copyright Finite Labs, LLC. Licensed under the GNU
+AGPL v3. Each vendored library under vendor/ keeps its own notice.
+
+-------------------------------------------------------------------------------
+
+control4-wled
+https://github.com/finitelabs/control4-wled (commit f04ca7a782b75ce77d6929f4216dee1b432fee31)
+
+src/group/light.lua is src/wled/light.lua, the Light V2 light model, with its
+DriverCentral diagnostics hooks removed and its module path changed.
+src/constants.lua and test/c4_local.lua are taken from the same project.
+Copyright Finite Labs, LLC. Licensed under the GNU AGPL v3.
