@@ -93,8 +93,6 @@ local busyUntil = 0
 local levelBusyUntil, colorBusyUntil = 0, 0
 --- Whether the lights have been read into the group once, which Ignore still allows.
 local seeded = false
--- A failed proxy send must be retried even when no member's level changes.
-local publicationPending = false
 --- The lights changed by something other than the group since they were last read, for the others to follow one
 --- when kept in sync.
 local changedLights = {}
@@ -280,7 +278,7 @@ local function readCapabilities(member)
 end
 
 local function readLevel(member, value)
-  local level = tofinite(value)
+  local level = tonumber(value)
   if level then
     member.level = math.max(0, math.min(100, math.floor(level + 0.5)))
   end
@@ -288,25 +286,11 @@ end
 
 local function readState(member, value)
   -- The level says more than on or off, so the state only fills in for a light with no level yet, or turns one off.
-  local text = type(value) == "string" and value:lower() or value
-  local on
-  if text == true or text == 1 or text == "1" or text == "true" then
-    on = true
-  elseif text == false or text == 0 or text == "0" or text == "false" then
-    on = false
-  else
-    return -- Missing/undefined is not an observed off state.
-  end
+  local on = toboolean(value)
   if not on then
     member.level = 0
   elseif (member.level or 0) == 0 then
-    local level = tofinite(C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_LEVEL))
-    if level and level > 0 then
-      readLevel(member, level)
-    else
-      -- Only a switch's valid on state establishes its full brightness.
-      member.level = member.dimmable == false and 100 or nil
-    end
+    member.level = tonumber(C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_LEVEL)) or 100
   end
 end
 
@@ -424,18 +408,7 @@ local function pushState()
   for field, value in pairs(vstate) do
     state[field] = value
   end
-  local ok, err = xpcall(function()
-    light.state(Group.entity(), state)
-  end, debug.traceback)
-  publicationPending = not ok
-  if ok then
-    CancelTimer("GroupProxyRetry")
-  else
-    log:error("The group's state could not be told to the proxy: %s", err)
-    SetTimer("GroupProxyRetry", 1000, function()
-      pushState()
-    end)
-  end
+  light.state(Group.entity(), state)
 end
 
 local function setVColor(color)
@@ -483,7 +456,7 @@ evaluate = function(force)
     return
   end
   local dims, color, cct = abilities()
-  local changed = force or publicationPending or not seeded
+  local changed = force or false
   -- A mode the group no longer has, after its lights or Light Type changed, is none.
   if
     (vstate.color_mode == ColorMode.COLOR_MODE_RGB and not color)
@@ -494,21 +467,12 @@ evaluate = function(force)
   local commanded = vLevel()
   -- Ignore still reads the lights once, at start, for a level to show.
   local first = not seeded
+  seeded = true
   local tracking = settings.brightnessTracking
   if first and tracking == Aggregate.Brightness.IGNORE then
     tracking = Aggregate.Brightness.AVERAGE
   end
   local level = Aggregate.level(members, tracking, settings.trackedId, commanded)
-  if first and level == nil then
-    publicationPending = false
-    CancelTimer("GroupProxyRetry")
-    if light.isOnline() then
-      light.disconnect(true)
-    end
-    onChange(Group.status())
-    return
-  end
-  seeded = true
   if level and not dims and level > 0 then
     level = 100
   end
@@ -540,7 +504,11 @@ evaluate = function(force)
     end
   end
   if changed then
-    pushState()
+    -- The status below is still shown if the light model raises.
+    local ok, err = xpcall(pushState, debug.traceback)
+    if not ok then
+      log:error("The group's state could not be told to the proxy: %s", err)
+    end
   end
   onChange(Group.status())
 end
@@ -755,8 +723,6 @@ end
 --- Tells the light model what the group is and shows now, after its lights or settings changed.
 function Group.refresh()
   if #members == 0 then
-    publicationPending = false
-    CancelTimer("GroupProxyRetry")
     if light.isOnline() then
       light.disconnect()
     end
@@ -790,7 +756,6 @@ function Group.setMembers(devices)
     unwatch(member)
   end
   members = now
-  seeded = false
   queue = {}
   spacing = false
   CancelTimer("GroupQueue")
