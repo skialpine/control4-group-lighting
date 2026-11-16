@@ -20,9 +20,14 @@ function C4:GetTime()
   return now
 end
 
-local toDevices, toProxy = {}, {}
+local toDevices, toProxy, membership = {}, {}, {}
 function C4:SendToDevice(id, command, params)
-  toDevices[#toDevices + 1] = { id = id, command = command, params = params or {} }
+  local sent = { id = id, command = command, params = params or {} }
+  if command == "LIGHT_GROUP_JOIN" or command == "LIGHT_GROUP_LEAVE" then
+    membership[#membership + 1] = sent
+  else
+    toDevices[#toDevices + 1] = sent
+  end
 end
 function C4:SendToProxy(binding, command, params)
   toProxy[#toProxy + 1] = { binding = binding, command = command, params = params }
@@ -101,12 +106,18 @@ local function lastToProxy(command)
 end
 
 local function clear()
-  toDevices, toProxy = {}, {}
+  toDevices, toProxy, membership = {}, {}, {}
 end
 
-local light = require("group.light")
+local Light = require("lib.light")
 local group = require("group.group")
-light.attach(group.adapter())
+local light = Light.new(group.adapter(), group.profile())
+group.attach(light)
+light:start()
+
+local function command(binding, name, params)
+  return RFP[binding](binding, name, params)
+end
 
 local status
 group.onChange(function(s)
@@ -115,7 +126,6 @@ end)
 
 T.section("A group with no lights is offline")
 ShimSetDevices(devices)
-light.lateInit()
 group.setMembers({})
 T.eq("the proxy is told offline", lastToProxy("ONLINE_CHANGED").STATE, false)
 T.eq("no lights", status.total, 0)
@@ -142,7 +152,7 @@ T.eq("nothing was sent to the lights", #toDevices, 0)
 
 T.section("A level goes to each light in its own form")
 clear()
-RFP.SET_BRIGHTNESS_TARGET(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 60, RATE = 2000 })
+command(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 60, RATE = 2000 })
 T.eq("a dimmer gets the target", sentTo(101, "RAMP_TO_LEVEL")[1].params.LEVEL, 60)
 T.eq("with the rate", sentTo(102, "RAMP_TO_LEVEL")[1].params.TIME, 2000)
 T.eq("a switch is turned on", #sentTo(103, "ON"), 1)
@@ -195,7 +205,7 @@ group.configure({ brightnessTracking = "Average" })
 T.section("Off as a command")
 group.configure({ offCommand = "Off" })
 clear()
-RFP.SET_BRIGHTNESS_TARGET(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 0, RATE = 0 })
+command(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 0, RATE = 0 })
 T.eq("a dimmer is sent OFF", #sentTo(101, "OFF"), 1)
 T.eq("and no level", #sentTo(101, "RAMP_TO_LEVEL"), 0)
 group.configure({ offCommand = "Brightness 0" })
@@ -220,14 +230,14 @@ T.eq("to its top", told.color_correlated_temperature_max, 5000)
 T.section("A color temperature set while off waits for the on")
 clear()
 local x, y = C4:ColorCCTtoXY(6000)
-RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+command(5001, "SET_COLOR_TARGET", {
   LIGHT_COLOR_TARGET_X = x,
   LIGHT_COLOR_TARGET_Y = y,
   LIGHT_COLOR_TARGET_MODE = 1,
   LIGHT_COLOR_TARGET_RATE = 0,
 })
 T.eq("the lights are sent nothing", #toDevices, 0)
-RFP.SET_BRIGHTNESS_TARGET(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 50, RATE = 0 })
+command(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 50, RATE = 0 })
 local strip = sentTo(201, "SET_COLOR_TARGET")[1]
 T.truthy("the strip gets a white", strip)
 T.eq("as a color temperature", strip.params.LIGHT_COLOR_TARGET_MODE, 1)
@@ -248,7 +258,7 @@ report(201, 1001, 50)
 report(202, 1001, 50)
 settle()
 clear()
-RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+command(5001, "SET_COLOR_TARGET", {
   LIGHT_COLOR_TARGET_X = 0.64,
   LIGHT_COLOR_TARGET_Y = 0.33,
   LIGHT_COLOR_TARGET_MODE = 0,
@@ -267,7 +277,7 @@ T.eq("at the rate", red.params.RATE, 500)
 T.section("A white after a color stays a white")
 settle()
 local wx, wy = C4:ColorCCTtoXY(4000)
-RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+command(5001, "SET_COLOR_TARGET", {
   LIGHT_COLOR_TARGET_X = wx,
   LIGHT_COLOR_TARGET_Y = wy,
   LIGHT_COLOR_TARGET_MODE = 1,
@@ -283,7 +293,7 @@ told = lastToProxy("DYNAMIC_CAPABILITIES_CHANGED")
 T.eq("no dimming", told.dimmer, false)
 T.eq("no color", told.supports_color, false)
 clear()
-RFP.OFF(5001, "OFF", {})
+command(5001, "OFF", {})
 T.eq("off reaches a light", #sentTo(201) > 0, true)
 group.configure({ lightType = "Automatic" })
 
@@ -295,7 +305,7 @@ end
 settle()
 group.configure({ commandDelay = 100 })
 clear()
-RFP.SET_BRIGHTNESS_TARGET(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 30, RATE = 0 })
+command(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 30, RATE = 0 })
 T.eq("one command at once", #toDevices, 1)
 settle()
 T.eq("the rest follow", #sentTo(201, "RAMP_TO_LEVEL") + #sentTo(202, "RAMP_TO_LEVEL"), 2)
@@ -312,7 +322,7 @@ T.eq("color temperature, for the Temperature tab", told.supports_color_correlate
 T.eq("no full color, so no Color tab", told.supports_color, false)
 clear()
 local px, py = C4:ColorCCTtoXY(3000)
-RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+command(5001, "SET_COLOR_TARGET", {
   LIGHT_COLOR_TARGET_X = px,
   LIGHT_COLOR_TARGET_Y = py,
   LIGHT_COLOR_TARGET_MODE = 1,
@@ -381,7 +391,7 @@ T.eq(
   100
 )
 clear()
-RFP.SET_BRIGHTNESS_TARGET(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 })
+command(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 })
 T.eq(
   "the level it already shows still goes to the light that is off",
   sentTo(502, "RAMP_TO_LEVEL")[1].params.LEVEL,
@@ -392,7 +402,7 @@ settle()
 group.configure({ lightType = "On/Off" })
 group.refresh()
 clear()
-RFP.ON(5001, "ON", {})
+command(5001, "ON", {})
 T.eq("and so does a plain on", #sentTo(502, "ON"), 1)
 group.configure({ lightType = "Automatic" })
 group.refresh()
@@ -400,7 +410,7 @@ report(502, 1001, 100)
 settle()
 
 T.section("A stop mid-ramp finds the lights an even share of the way")
-T.eq("the ramp is taken as even", group.adapter().curve(0.2), 0.2)
+T.eq("the ramp is taken as even", group.device().fade.curve, "linear")
 
 T.section("Kept in sync, lights set apart together are left apart")
 device(601, "A", DIMMER, 50)
@@ -451,7 +461,7 @@ ShimSetDevices(devices)
 group.setMembers({ { id = 701, name = "Lamp" }, { id = 702, name = "Lamp 2" } })
 settle()
 clear()
-RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+command(5001, "SET_COLOR_TARGET", {
   LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE = 3000,
   LIGHT_COLOR_TARGET_MODE = 1,
   LIGHT_COLOR_TARGET_RATE = 0,
@@ -463,8 +473,8 @@ T.section("A quick command during a long ramp does not end the wait for it")
 report(702, 1001, 50)
 settle()
 clear()
-RFP.SET_BRIGHTNESS_TARGET(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 100, RATE = 30000 })
-RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+command(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 100, RATE = 30000 })
+command(5001, "SET_COLOR_TARGET", {
   LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE = 4000,
   LIGHT_COLOR_TARGET_MODE = 1,
   LIGHT_COLOR_TARGET_RATE = 0,
@@ -492,7 +502,7 @@ group.setMembers({ { id = 801, name = "Narrow" }, { id = 802, name = "Wide" } })
 group.configure({ scaled = true })
 settle()
 clear()
-RFP.SET_COLOR_TARGET(5001, "SET_COLOR_TARGET", {
+command(5001, "SET_COLOR_TARGET", {
   LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE = 4250,
   LIGHT_COLOR_TARGET_MODE = 1,
   LIGHT_COLOR_TARGET_RATE = 0,
@@ -528,5 +538,175 @@ group.configure({ lightType = "Dimmer" })
 group.refresh()
 T.check("the lights are not read again", noneToProxy("LIGHT_BRIGHTNESS_CHANGED", 20))
 group.configure({ brightnessTracking = "Average", lightType = "Automatic" })
+
+T.section("An unchanged on-color does not interrupt the brightness ramp")
+local sameX, sameY = C4:ColorCCTtoXY(3200)
+device(1001, "Left", TUNABLE, 0)
+device(1002, "Right", TUNABLE, 0)
+for _, id in ipairs({ 1001, 1002 }) do
+  devices[id].variables["1200"] = { value = sameX .. "," .. sameY .. ",1" }
+end
+ShimSetDevices(devices)
+group.setMembers({ { id = 1001, name = "Left" }, { id = 1002, name = "Right" } })
+settle()
+-- A color chosen while off is carried by both Navigator On and a keypad click.
+command(5001, "SET_COLOR_TARGET", {
+  LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE = 3200,
+  LIGHT_COLOR_TARGET_MODE = 1,
+  RATE = 0,
+})
+clear()
+command(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 100, RATE = 750 })
+T.eq("Navigator sends only one command to each light", #toDevices, 2)
+T.eq("the brightness ramp keeps its duration", sentTo(1001, "RAMP_TO_LEVEL")[1].params.TIME, 750)
+T.eq("no color command starts a separate turn-on", #sentTo(1001, "SET_COLOR_TARGET"), 0)
+report(1001, 1001, 100)
+report(1002, 1001, 100)
+settle()
+command(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 0, RATE = 750 })
+report(1001, 1001, 0)
+report(1002, 1001, 0)
+settle()
+command(5001, "SET_COLOR_TARGET", {
+  LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE = 3200,
+  LIGHT_COLOR_TARGET_MODE = 1,
+  RATE = 0,
+})
+clear()
+command(300, "DO_CLICK", {})
+T.eq("a keypad click also sends only the ramps", #toDevices, 2)
+T.eq("the keypad does not resend the on-color", #sentTo(1002, "SET_COLOR_TARGET"), 0)
+settle()
+
+-- Exercise combined level/color commands directly for the per-light mapping cases.
+local function whiteRamp(kelvin)
+  group.adapter():send({
+    kind = "change",
+    on = true,
+    level = 1,
+    setsLevel = true,
+    setsColor = true,
+    color = { mode = "cct", kelvin = kelvin, x = C4:ColorCCTtoXY(kelvin), y = select(2, C4:ColorCCTtoXY(kelvin)) },
+    transitionMs = 750,
+  })
+end
+
+T.section("A changed or unknown on-color is still applied")
+local otherX, otherY = C4:ColorCCTtoXY(4000)
+report(1002, 1200, otherX .. "," .. otherY .. ",1")
+settle()
+clear()
+whiteRamp(3200)
+T.eq("the light already at the color gets only a ramp", #sentTo(1001), 1)
+T.eq("the other light gets its color corrected", #sentTo(1002, "SET_COLOR_TARGET"), 1)
+T.eq("color is corrected before its brightness ramp", sentTo(1002)[1].command, "SET_COLOR_TARGET")
+settle()
+device(1003, "Unknown color", TUNABLE, 0)
+ShimSetDevices(devices)
+group.setMembers({ { id = 1003, name = "Unknown color" } })
+settle()
+clear()
+whiteRamp(3200)
+T.eq("an unknown color is sent", #sentTo(1003, "SET_COLOR_TARGET"), 1)
+settle()
+
+T.section("An unchanged mapped white does not interrupt the ramp")
+local topX, topY = C4:ColorCCTtoXY(5000)
+report(1003, 1200, topX .. "," .. topY .. ",1")
+settle()
+clear()
+whiteRamp(6000)
+T.eq("the closest white is already set", #sentTo(1003, "SET_COLOR_TARGET"), 0)
+report(1003, 1001, 100)
+settle()
+clear()
+group.sync()
+T.eq("Sync Lights still explicitly reapplies color", #sentTo(1003, "SET_COLOR_TARGET"), 1)
+settle()
+
+T.section("A color transition or queued color still gets replaced")
+group.adapter():send({
+  kind = "change",
+  on = true,
+  level = 1,
+  setsColor = true,
+  color = { mode = "cct", kelvin = 3200, x = sameX, y = sameY },
+  transitionMs = 2000,
+})
+clear()
+whiteRamp(5000)
+T.eq("a moving color is replaced even if its old report matches", #sentTo(1003, "SET_COLOR_TARGET"), 1)
+settle()
+group.adapter():send({
+  kind = "change",
+  on = true,
+  level = 1,
+  setsColor = true,
+  color = { mode = "cct", kelvin = 3200, x = sameX, y = sameY },
+  transitionMs = 0,
+})
+clear()
+whiteRamp(5000)
+T.eq("an instant color awaiting feedback is also replaced", #sentTo(1003, "SET_COLOR_TARGET"), 1)
+settle()
+group.configure({ commandDelay = 100 })
+whiteRamp(5000) -- Dispatch a level, so the next color has to queue.
+whiteRamp(3200)
+clear()
+whiteRamp(5000)
+settle()
+local queuedColor = sentTo(1003, "SET_COLOR_TARGET")
+T.eq("the queued color was replaced", #queuedColor, 1)
+T.eq("the replacement is the latest white", queuedColor[1].params.LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE, 5000)
+group.configure({ commandDelay = 0 })
+
+T.section("Scaled and emulated whites are compared as the light reports them")
+group.configure({ scaled = true, manualRange = true, minKelvin = 2000, maxKelvin = 6500 })
+clear()
+whiteRamp(6500)
+T.eq("a scaled white already at the light's upper end is skipped", #sentTo(1003, "SET_COLOR_TARGET"), 0)
+settle()
+group.configure({ maxKelvin = 10000 })
+clear()
+whiteRamp(6500)
+T.eq("changing the mapping still applies the new white", #sentTo(1003, "SET_COLOR_TARGET"), 1)
+settle()
+group.configure({ scaled = false, manualRange = false })
+device(1004, "Emulated white", COLOR, 0)
+devices[1004].variables["1200"] = { value = otherX .. "," .. otherY .. ",0" }
+ShimSetDevices(devices)
+group.setMembers({ { id = 1004, name = "Emulated white" } })
+settle()
+clear()
+whiteRamp(4000)
+T.eq("an emulated white already shown as RGB is skipped", #sentTo(1004, "SET_COLOR_TARGET"), 0)
+T.eq("the emulated white light still gets its ramp", #sentTo(1004, "RAMP_TO_LEVEL"), 1)
+
+T.section("An off member at 5000 K rejoins four members at 100 percent and 3200 K")
+for id = 1101, 1105 do
+  device(id, "Bathroom " .. id, TUNABLE, id == 1101 and 0 or 100)
+  local cx, cy = C4:ColorCCTtoXY(id == 1101 and 5000 or 3200)
+  devices[id].variables["1200"] = { value = cx .. "," .. cy .. ",1" }
+end
+ShimSetDevices(devices)
+local bathroom = {}
+for id = 1101, 1105 do
+  bathroom[#bathroom + 1] = { id = id, name = "Bathroom " .. id }
+end
+group.setMembers(bathroom)
+settle()
+T.eq("the group reads On", group.snapshot().level, 100)
+T.falsy("the off member is out of step", group.status().inSync)
+clear()
+command(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 100, RATE = 750 })
+T.eq("On reaches the off member", sentTo(1101, "RAMP_TO_LEVEL")[1].params.LEVEL, 100)
+local rejoin = sentTo(1101, "SET_COLOR_TARGET")[1]
+T.truthy("the off member gets its color restored", rejoin)
+T.check("to the group's 3200 K", math.abs(rejoin.params.LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE - 3200) < 70)
+T.eq("the members already in step get only their ramps", #sentTo(1102), 1)
+report(1101, 1001, 100)
+report(1101, 1200, sameX .. "," .. sameY .. ",1")
+settle()
+T.truthy("all five are in step after the answer", group.status().inSync)
 
 T.finish()

@@ -1,7 +1,7 @@
 -- Light Group.
 --
 -- One Light V2 light that stands for several: the lights picked in the Lights property, from any
--- manufacturer. The light model (src/group/light.lua) runs the light_v2 proxy on binding 5001 (on
+-- manufacturer. The shared engine (src/lib/light.lua) runs the light_v2 proxy on binding 5001 (on
 -- modes, presets, rates, ramps, Advanced Lighting Scenes and the three button links) and
 -- src/group/group.lua is its device: it sends each light its commands and reads their levels and
 -- colors back into one state.
@@ -32,7 +32,7 @@ local githubUpdater = require("lib.github-updater")
 local pageParams = require("lib.ui.page-params")
 local tabProperties = require("lib.ui.tab-properties")
 local constants = require("constants")
-local light = require("group.light")
+local Light = require("lib.light")
 local group = require("group.group")
 local cycle = require("group.cycle")
 
@@ -49,7 +49,8 @@ local PROXY_BINDING = 5001
 local CYCLE_BINDING = 303
 local ADVANCED_LIGHTING_C4I = "control4_agent_adv_lighting.c4i"
 
-light.attach(group.adapter())
+local light = Light.new(group.adapter(), group.profile())
+group.attach(light)
 
 --- What the lights last showed, for the events to fire on a change only.
 local gShown = {}
@@ -63,6 +64,9 @@ local function showStatus(status)
   if status.total == 0 then
     UpdateProperty("Driver Status", "No lights selected")
     UpdateProperty("Group Summary", "")
+  elseif status.known == 0 then
+    UpdateProperty("Driver Status", "Waiting for light feedback")
+    UpdateProperty("Group Summary", "No light levels reported")
   else
     UpdateProperty("Driver Status", "Online")
     UpdateProperty(
@@ -74,6 +78,10 @@ local function showStatus(status)
   values:update("LIGHTS_TOTAL", status.total, "NUMBER")
   values:update("LIGHTS_IN_SYNC", status.inSync, "BOOL")
 
+  -- Incomplete feedback is not an on/off or sync transition. Keep the last known event baseline.
+  if status.known < status.total then
+    return
+  end
   local allOn = status.total > 0 and status.on == status.total
   local allOff = status.total > 0 and status.on == 0
   -- Nothing fires for the first reading after a start: it is no change.
@@ -216,7 +224,7 @@ cycle.onActivate(function(step)
   -- A scene sets each light where it wants it: none of them is one light changed by itself, to be followed.
   group.hold(5000)
   if step.off then
-    RFP.OFF(PROXY_BINDING, "OFF", {})
+    light:command({ kind = "off" })
     return
   end
   local agent = advancedLighting()
@@ -251,7 +259,7 @@ local function cycleHold()
   if gCycleHold == "Previous Scene" then
     cycle.previous()
   elseif gCycleHold == "Off" then
-    RFP.OFF(PROXY_BINDING, "OFF", {})
+    light:command({ kind = "off" })
     cycle.restart()
   elseif gCycleHold == "Restart Cycle" then
     cycle.restart()
@@ -416,8 +424,8 @@ function OnDriverLateInit()
   --#endif
 
   gInitialized = true
-  light.lateInit()
   readLights()
+  light:start()
   -- A change made in Composer's Properties tab reaches the open Settings tab.
   tabProperties:follow(UIR._GET_CONFIG)
   --#ifdef DRIVERCENTRAL
@@ -427,6 +435,13 @@ function OnDriverLateInit()
     end
   end)
   --#endif
+end
+
+function OnDriverDestroyed()
+  for _, name in ipairs({ "UpdateCheck", "LogMode", "CycleHold", "CycleTrack", "TabPush" }) do
+    CancelTimer(name)
+  end
+  group.stop()
 end
 
 ---------------------------------------------------------------------------
@@ -638,6 +653,7 @@ function EC.Display_Control_Log()
   log:trace("EC.Display_Control_Log()")
   local lines = group.controlLog()
   print(#lines == 0 and "No commands sent yet" or table.concat(lines, "\n"))
+  print("Light engine: " .. JSON:encode(light:diagnostics()))
 end
 
 function EC.Test_Light_Commands()

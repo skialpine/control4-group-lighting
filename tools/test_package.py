@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for tools/package.py's checks: check-encrypted, which `make package` runs on
-every build that must ship its Lua encrypted, and the tag version and post-build
-checks CI runs.
+every build that must ship its Lua encrypted, check-sort-order, which `make check`
+runs on every driver.xml, and the tag version and post-build checks CI runs.
 """
 
 import contextlib
@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from package import (  # noqa: E402
     check_encrypted,
     check_pdfs,
+    check_sort_order,
     check_version,
     tag_version,
 )
@@ -102,6 +103,26 @@ class CheckEncryptedTest(InTempDir):
         self._package("oss", {"driver.xml": PLAIN_XML, "driver.lua": "print(1)"})
         self.assertEqual(self._check("oss"), (0, ""))
 
+    def test_a_folder_given_is_checked_in_place_of_dist(self):
+        self._package(
+            "drivercentral", {"driver.xml": ENCRYPTED_XML, "driver.lua.encrypted": "x"}
+        )
+        release = Path("release") / "c4z"
+        release.mkdir(parents=True)
+        with zipfile.ZipFile(release / "probe.c4z", "w") as zf:
+            zf.writestr("driver.xml", ENCRYPTED_XML)
+            zf.writestr("driver.lua.encrypted", "x")
+            zf.writestr("driver.lua", "print(1)")
+        code, _, err = self._run(check_encrypted, "drivercentral", str(release))
+        self.assertEqual(code, 1)
+        self.assertIn("holds driver.lua in plain text", err)
+
+    def test_an_empty_folder_given_fails(self):
+        Path("release").mkdir()
+        code, _, err = self._run(check_encrypted, "drivercentral", "release")
+        self.assertEqual(code, 1)
+        self.assertIn("release has no package to check", err)
+
 
 class TagVersionTest(InTempDir):
     def test_a_date_tag_gives_its_date(self):
@@ -181,6 +202,64 @@ class CheckVersionTest(InTempDir):
     def test_no_package_fails(self):
         (Path("dist") / "oss" / "c4z").mkdir(parents=True)
         self.assertEqual(self._run(check_version, "oss", "20261101")[0], 1)
+
+
+class CheckSortOrderTest(InTempDir):
+    def _xml(self, *orders, name="driver.xml"):
+        body = "".join(
+            f"<conditional><id>{i}</id><name>C{i}</name>{order}</conditional>"
+            for i, order in enumerate(orders, 1)
+        )
+        Path(name).write_text(
+            f"<devicedata><!-- #ifdef DRIVERCENTRAL --><conditionals>{body}</conditionals>"
+            "<!-- #endif --></devicedata>"
+        )
+        return name
+
+    def _check(self, *paths):
+        code, _, err = self._run(check_sort_order, list(paths))
+        return code, err
+
+    def test_every_conditional_with_its_own_sort_order_passes(self):
+        path = self._xml("<sort_order>2</sort_order>", "<sort_order> 1 </sort_order>")
+        self.assertEqual(self._check(path), (0, ""))
+
+    def test_a_driver_xml_with_no_conditionals_passes(self):
+        Path("driver.xml").write_text("<devicedata><name>x</name></devicedata>")
+        self.assertEqual(self._check("driver.xml"), (0, ""))
+
+    def test_a_conditional_without_a_sort_order_fails(self):
+        code, err = self._check(self._xml("<sort_order>1</sort_order>", ""))
+        self.assertEqual(code, 1)
+        self.assertIn("conditional C2 has no whole-number <sort_order>", err)
+
+    def test_a_sort_order_that_is_not_a_whole_number_fails(self):
+        code, err = self._check(self._xml("<sort_order>first</sort_order>"))
+        self.assertEqual(code, 1)
+        self.assertIn("conditional C1 has no whole-number <sort_order>", err)
+
+    def test_two_conditionals_sharing_a_sort_order_fail(self):
+        path = self._xml("<sort_order>1</sort_order>", "<sort_order>1</sort_order>")
+        code, err = self._check(path)
+        self.assertEqual(code, 1)
+        self.assertIn("conditional C2 has <sort_order>1, as C1 does", err)
+
+    def test_a_sort_order_up_to_1000_passes(self):
+        path = self._xml("<sort_order>1000</sort_order>")
+        self.assertEqual(self._check(path), (0, ""))
+
+    def test_a_sort_order_above_1000_fails(self):
+        code, err = self._check(self._xml("<sort_order>1001</sort_order>"))
+        self.assertEqual(code, 1)
+        self.assertIn("conditional C1 has <sort_order>1001, above 1000", err)
+
+    def test_each_driver_xml_is_checked_on_its_own(self):
+        a = self._xml("<sort_order>1</sort_order>", name="a.xml")
+        b = self._xml("<sort_order>1</sort_order>", "", name="b.xml")
+        code, err = self._check(a, b)
+        self.assertEqual(code, 1)
+        self.assertNotIn("a.xml", err)
+        self.assertIn("b.xml: conditional C2", err)
 
 
 if __name__ == "__main__":

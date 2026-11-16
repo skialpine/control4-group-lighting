@@ -166,6 +166,18 @@ function Aggregate.sameColor(a, b)
   return math.abs(a.x - b.x) <= Aggregate.XY_TOLERANCE and math.abs(a.y - b.y) <= Aggregate.XY_TOLERANCE
 end
 
+--- Whether one member matches the group's level and color. Off lights have no visible color to compare.
+function Aggregate.memberInSync(member, commanded, color)
+  local level = Aggregate.memberLevel(member, commanded)
+  if level == nil then
+    return nil
+  end
+  if (level > 0) ~= (commanded > 0) or math.abs(level - commanded) > Aggregate.LEVEL_TOLERANCE then
+    return false
+  end
+  return level == 0 or not color or not member.color or Aggregate.sameColor(member.color, color)
+end
+
 --- Whether every light that has reported is at one level and one color.
 --- @param members MemberState[]
 --- @param commanded integer

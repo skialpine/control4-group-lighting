@@ -1,0 +1,445 @@
+diff --git a/example-driver/drivers/example_light/driver.lua b/example-driver/drivers/example_light/driver.lua
+index f185be6..e68cfe3 100644
+--- a/example-driver/drivers/example_light/driver.lua
++++ b/example-driver/drivers/example_light/driver.lua
+@@ -186,6 +186,12 @@ function OnDriverLateInit()
+   --#endif
+ end
+ 
++function OnDriverDestroyed()
++  CancelTimer("ExampleLight.Pushed")
++  CancelTimer("ExampleLight.Answer")
++  light:stop()
++end
++
+ function OPC.Driver_Status(propertyValue)
+   log:trace("OPC.Driver_Status('%s')", propertyValue)
+   if not gInitialized then
+diff --git a/example-driver/test/light_rigs.lua b/example-driver/test/light_rigs.lua
+index 9f91535..7fbcfb4 100644
+--- a/example-driver/test/light_rigs.lua
++++ b/example-driver/test/light_rigs.lua
+@@ -80,4 +80,12 @@ function rig.load(h, state)
+   }
+ end
+ 
++function rig.reload(h)
++  local state = h.device.state()
++  if OnDriverDestroyed then
++    OnDriverDestroyed()
++  end
++  return rig.load(h, state)
++end
++
+ return { version = C.RIG_VERSION, rigs = { example_light = { rig } } }
+diff --git a/template/src/lib/light.lua b/template/src/lib/light.lua
+index 1038233..d7f4d92 100644
+--- a/template/src/lib/light.lua
++++ b/template/src/lib/light.lua
+@@ -222,6 +222,9 @@ end
+ --- One device state.
+ --- @param report LightReport
+ function Light:report(report)
++  if self.started == nil then
++    return
++  end
+   local why = unfit(report)
+   if why then
+     log:error("Light:report: the report is dropped: %s", why)
+@@ -256,6 +259,35 @@ function Light:lost(suspended)
+   self:_tellGroups()
+ end
+ 
++--- A detached, read-only diagnostic snapshot. Reading it sends no commands and changes no deadlines.
++function Light:diagnostics()
++  local pending = {}
++  for aspect, window in pairs(self.ledger.windows) do
++    pending[aspect] = {
++      kind = window.kind,
++      deadlineMs = window.deadline,
++      reportsHeard = window.heard,
++      refreshAsked = window.asked,
++      commands = #window.sent,
++    }
++  end
++  return {
++    atMs = C4:GetTime(),
++    started = self.started == true,
++    online = self.online,
++    queuedReports = #self.waiting,
++    state = TableDeepCopy(self.motion:view()),
++    pending = pending,
++  }
++end
++
++--- End this Lua instance without talking to a proxy or device being unloaded. nil distinguishes a stopped
++--- instance from one not started yet, whose reports must wait for start().
++function Light:stop()
++  self.started, self.online, self.waiting = nil, false, {}
++  self:_endRun()
++end
++
+ --- Reset Driver: end the run, tell offline until the next report, ask the device.
+ function Light:reset()
+   self:_endRun()
+diff --git a/template/src/lib/light/proxy.lua b/template/src/lib/light/proxy.lua
+index f53d7a6..c9b23a0 100644
+--- a/template/src/lib/light/proxy.lua
++++ b/template/src/lib/light/proxy.lua
+@@ -739,13 +739,32 @@ function LightProxy:shown()
+     kelvin = Color.kelvin(color.x, color.y)
+     kelvin = kelvin and math.floor(kelvin + 0.5) or nil
+   end
+-  local told = self.shownTold
+-  if not self.shownDue and told and told.kelvin == kelvin and told.minOn == lo and told.maxOn == hi then
++  local level = self.level.target or self.level.level
++  local displayed = self.color.target or color
++  local shown = { kelvin = kelvin, minOn = lo, maxOn = hi, level = level }
++  if level ~= nil then
++    shown.on = level > 0
++  end
++  if displayed then
++    shown.color = { x = displayed.x, y = displayed.y, mode = displayed.mode, kelvin = displayed.kelvin }
++  end
++  if not self.shownDue and Caps.same(self.shownTold, shown) then
+     return nil
+   end
+   self.shownDue = false
+-  self.shownTold = { kelvin = kelvin, minOn = lo, maxOn = hi }
+-  return { kelvin = kelvin, minOn = lo, maxOn = hi }
++  self.shownTold = shown
++  -- A device page may keep or edit its copy without changing the next comparison.
++  local copy = {}
++  for key, value in pairs(shown) do
++    copy[key] = value
++  end
++  if shown.color then
++    copy.color = {}
++    for key, value in pairs(shown.color) do
++      copy.color[key] = value
++    end
++  end
++  return copy
+ end
+ 
+ --- A read the proxy, or a keypad over a Button Link, asks.
+diff --git a/template/src/lib/light/types.lua b/template/src/lib/light/types.lua
+index 0518234..f72db3d 100644
+--- a/template/src/lib/light/types.lua
++++ b/template/src/lib/light/types.lua
+@@ -161,6 +161,9 @@ Types.API = 1
+ 
+ --- What the proxy shows that a device page may mirror.
+ --- @class LightShown
++--- @field on boolean|nil The displayed target's power; nil until a level is known.
++--- @field level integer|nil The displayed C4 level, its target during a ramp; nil until known.
++--- @field color LightColor|nil The displayed color, its target during a fade; nil until known. A fresh copy.
+ --- @field kelvin integer|nil The Kelvin the proxy shows; nil in full color or without CCT.
+ --- @field minOn integer Min On Level, 1-100.
+ --- @field maxOn integer Max On Level, 1-100.
+@@ -226,6 +229,14 @@ Types.API = 1
+ --   From OnDriverLateInit. Reads the proxy (GET_SETUP, 6661, 1001/1110, 1200/1210), tells offline until the
+ --   device's first report, and asks refresh() once. Reports given before it are taken then, in order.
+ --
++-- light:diagnostics()
++--   A detached local snapshot of the modeled state, ramp targets and time left, pending feedback deadlines,
++--   and queued report count. Reading or editing the snapshot has no effect on the engine. It sends nothing.
++--
++-- light:stop()
++--   From OnDriverDestroyed: end the run and discard queued and later reports without sending proxy or device
++--   commands. A new start() can resume it. The adapter still cancels its own transport work and listeners.
++--
+ -- light:declare(device)
+ --   Each connection, before its first report, and on any change. The same facts do nothing. Capabilities
+ --   alone: re-tells the capabilities and keeps the run. A changed fade also ends running ramps at their targets
+diff --git a/template/src/lib/ui/page.js b/template/src/lib/ui/page.js
+index 0065080..189a0fb 100644
+--- a/template/src/lib/ui/page.js
++++ b/template/src/lib/ui/page.js
+@@ -3,6 +3,7 @@
+ // "<!-- #embed ../../../../src/lib/ui/page.js -->", then any component it uses (variables.js, expressions.js) the same
+ // way. Everything is on one object, Kit, so a page's own function of the same name never replaces the kit's.
+ //   Kit.connectDriver(options)        pushes from the driver, by command, each one object; the live-link banner
++//   Kit.request(method, path, body)  authenticated controller JSON; rejects HTTP, network and decode errors
+ //   Kit.sendCommand(command, params)  a command to the driver's UIR handlers
+ //   Kit.call(command, params, answer, ms)  a command, then its answer push: the push's object, or null in time
+ //   Kit.follow(itemId)                another item on the same link: its pushes, commands and calls
+@@ -83,17 +84,25 @@ var Kit = (function () {
+   }
+   // #endif
+ 
+-  function api(method, path, body) {
++  // An authenticated controller request for a custom tab. Errors reject so a failed read cannot silently
++  // replace saved data with an empty result. Credentials stay in the header on this controller's origin.
++  function request(method, path, body) {
++    if (!apiHost || typeof path !== "string" || path.charAt(0) !== "/" || path.indexOf("//") === 0) {
++      return Promise.reject(new Error("A controller request needs a controller and a relative path"));
++    }
+     var opts = { method: method, headers: { Authorization: "Bearer " + apiToken, "Content-Type": "application/json" } };
+-    if (body) opts.body = JSON.stringify(body);
+-    return fetch(apiOrigin() + path, opts)
+-      .then(function (r) {
+-        return r.json();
+-      })
+-      .catch(function (e) {
+-        console.error("API error:", method, path, e);
+-        return null;
+-      });
++    if (body !== undefined) opts.body = JSON.stringify(body);
++    return fetch(apiOrigin() + path, opts).then(function (r) {
++      if (r.ok === false) throw new Error("Controller request failed: HTTP " + r.status);
++      return r.status === 204 ? null : r.json();
++    });
++  }
++
++  function api(method, path, body) {
++    return request(method, path, body).catch(function (e) {
++      console.error("API error:", method, path, e);
++      return null;
++    });
+   }
+ 
+   // UTF-8, since btoa takes only Latin-1, broken by a newline every 76 characters: the broker's cost grows with the
+@@ -655,6 +664,7 @@ var Kit = (function () {
+     str: str,
+     esc: esc,
+     ago: ago,
++    request: request,
+     sendCommand: sendCommand,
+     call: call,
+     follow: follow,
+diff --git a/template/test/light_conformance.lua b/template/test/light_conformance.lua
+index 51a0fa6..8bbef0c 100644
+--- a/template/test/light_conformance.lua
++++ b/template/test/light_conformance.lua
+@@ -982,6 +982,31 @@ function C.run(T, rig)
+     end)
+   end
+ 
++  if rig.reload then
++    T.section(name .. ": an in-place update preserves the proxy, device and saved light settings")
++    C.case(T, name, function()
++      local h = fresh(rig)
++      local p = h.proxy
++      p:send("SET_CLICK_RATE_UP", { RATE = 1234 })
++      p:send("SET_HOLD_RATE_DOWN", { RATE = 4321 })
++      p:send("SET_PRESET_LEVEL", { LEVEL = 75 })
++      p:send("SET_LEVEL", { LEVEL = 60 })
++      h.clock.run(ms)
++      local level = p.level
++      local replacement = rig.reload(h)
++      if replacement then
++        h.device = replacement
++      end
++      h.clock.run(ms)
++      T.check(name .. ": the new instance is online", h.light.online)
++      T.eq(name .. ": the device is left where it was", p.level, level)
++      T.eq(name .. ": click rate survives", h.light.settings:clickRate(true), 1234)
++      T.eq(name .. ": hold rate survives", h.light.settings:holdRate(false), 4321)
++      T.eq(name .. ": Default On survives", h.light.settings:presetLevel(), 75)
++      finish(h)
++    end)
++  end
++
+   if rig.rest then
+     T.section(name .. ": a command the device rests apart from is told once, where the device rests")
+     C.case(T, name, function()
+diff --git a/template/test/light_rig.lua b/template/test/light_rig.lua
+index 3c2b468..df824d5 100644
+--- a/template/test/light_rig.lua
++++ b/template/test/light_rig.lua
+@@ -46,6 +46,9 @@ Rig.VERSION = 1
+ ---   and return the device.
+ --- @field setup string|nil GET_SETUP's answer, as P.setupFile("setup-607.xml"). Default none.
+ --- @field settleMs integer|nil How long the light takes to settle after a command, less 5 s. Default 12000.
++--- @field reload fun(h: LightRigHarness): LightRigDevice|nil Optional in-place update probe. Keep the proxy,
++---   physical device, properties and persisted storage; unload the old Lua instance and load the driver afresh.
++---   Return a replacement device facade if needed. Absent: no in-place update case is run.
+ --- @field rest fun(h: LightRigHarness)|nil Sends the proxy command after which the adapter returns a
+ ---   LightRest; nil when it never does.
+ 
+diff --git a/tests/light/test_contract.lua b/tests/light/test_contract.lua
+index 4167c96..c981fb2 100644
+--- a/tests/light/test_contract.lua
++++ b/tests/light/test_contract.lua
+@@ -1,7 +1,7 @@
+ local T = require("testlib")
+ local Types = require("lib.light.types")
+ 
+-local CONTRACT = { api = 1, hash = 526899584 }
++local CONTRACT = { api = 1, hash = 2095189211 }
+ 
+ --- @return string
+ local function source()
+diff --git a/tests/light/test_light_behavior.lua b/tests/light/test_light_behavior.lua
+index bf9d255..6ccc167 100644
+--- a/tests/light/test_light_behavior.lua
++++ b/tests/light/test_light_behavior.lua
+@@ -564,11 +564,11 @@ case(function()
+   T.eq("once at the first report", #w.m.shown, 1)
+   w.proxy:send("SET_LEVEL", { LEVEL = 50 })
+   w.run(5000)
+-  T.eq("not for a level", #w.m.shown, 1)
++  T.eq("again for the displayed level", #w.m.shown, 2)
+   w.proxy:send("SET_MIN_ON_LEVEL", { LEVEL = 10 })
+-  T.eq("again when the Min changes", #w.m.shown, 2)
++  T.eq("again when the Min changes", #w.m.shown, 3)
+   w.proxy:send("SET_MIN_ON_LEVEL", { LEVEL = 10 })
+-  T.eq("not for the same Min", #w.m.shown, 2)
++  T.eq("not for the same Min", #w.m.shown, 3)
+   w.restore()
+ end)
+ 
+@@ -579,4 +579,41 @@ case(function()
+   w.restore()
+ end)
+ 
++T.section("stop ends timers without notifying the unloading proxy, and discards late reports")
++case(function()
++  local w = K.world(K.ES, {}, 20)
++  w.proxy:send("SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 90, RATE = 4000 })
++  w.run(500)
++  w.proxy:mark()
++  local sent = #w.m.sent
++  w.light:stop()
++  w.light:report({ kind = "push", on = true, level = 0.9 })
++  w.run(10000)
++  T.eq("no more device commands", #w.m.sent, sent)
++  T.eq("no proxy notification after stop", #w.proxy:said(), 0)
++  T.eq("no retained late reports", #w.light.waiting, 0)
++  w.light:start()
++  w.run(5000)
++  T.eq("an explicit start resumes the connection", w.light.online, true)
++  w.restore()
++end)
++
++T.section("diagnostics is detached and does not send commands or extend feedback deadlines")
++case(function()
++  local w = K.world(K.ES, {}, 20)
++  w.proxy:send("SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = 90, RATE = 4000 })
++  w.run(500)
++  local count = #w.m.sent
++  local first = w.light:diagnostics()
++  T.eq("the pending target is shown", first.state.levelTarget, 0.9)
++  T.eq("the ramp time left is shown", first.state.levelMs, 3500)
++  local deadline = first.pending.level.deadlineMs
++  first.state.levelTarget, first.pending.level.deadlineMs = 0, 0
++  local second = w.light:diagnostics()
++  T.eq("state is not mutable through the snapshot", second.state.levelTarget, 0.9)
++  T.eq("the feedback deadline stays unchanged", second.pending.level.deadlineMs, deadline)
++  T.eq("no wire operation was added", #w.m.sent, count)
++  w.restore()
++end)
++
+ T.finish()
+diff --git a/tests/light/test_proxy.lua b/tests/light/test_proxy.lua
+index ba03db5..38f3fdb 100644
+--- a/tests/light/test_proxy.lua
++++ b/tests/light/test_proxy.lua
+@@ -594,22 +594,67 @@ do
+   -- The Kelvin shown is the proxy's own conversion of the xy it holds, not the one a report came with.
+   local K = math.floor(Color.kelvin(0.3, 0.32) + 0.5)
+   p:sync(rest(true, 0.5, { x = 0.3, y = 0.32, mode = "cct", kelvin = 6000 }))
+-  T.eq("the first after online", p:shown(), { kelvin = K, minOn = 1, maxOn = 100 })
++  T.eq("the first after online", p:shown(), {
++    kelvin = K,
++    minOn = 1,
++    maxOn = 100,
++    on = true,
++    level = 50,
++    color = { x = 0.3, y = 0.32, mode = "cct", kelvin = 6000 },
++  })
+   T.check("which is not the report's own Kelvin", K ~= 6000, K)
+   T.eq("nothing while it holds", p:shown(), nil)
+   settings.hi = 80
+-  T.eq("a new Max On", p:shown(), { kelvin = K, minOn = 1, maxOn = 80 })
++  T.eq("a new Max On", p:shown(), {
++    kelvin = K,
++    minOn = 1,
++    maxOn = 80,
++    on = true,
++    level = 50,
++    color = { x = 0.3, y = 0.32, mode = "cct", kelvin = 6000 },
++  })
+   p:sync(rest(true, 0.5, RED))
+-  T.eq("full color has no kelvin", p:shown(), { minOn = 1, maxOn = 80 })
++  T.eq(
++    "full color has no kelvin",
++    p:shown(),
++    { minOn = 1, maxOn = 80, on = true, level = Range.toLevel(0.5, 1, 80), color = RED }
++  )
+   p:offline()
+   p:online(DEVICE)
+-  T.eq("a new connection is owed one again", p:shown(), { minOn = 1, maxOn = 80 })
++  T.eq(
++    "a new connection is owed one again",
++    p:shown(),
++    { minOn = 1, maxOn = 80, on = true, level = Range.toLevel(0.5, 1, 80), color = RED }
++  )
+   take()
+ 
+   p = make()
+   p:online({ dims = true, color = true })
+   p:sync(rest(true, 0.5, { x = 0.3, y = 0.32, mode = "cct", kelvin = 6000 }))
+-  T.eq("a device without CCT shows no kelvin", p:shown(), { minOn = 1, maxOn = 100 })
++  T.eq(
++    "a device without CCT shows no kelvin",
++    p:shown(),
++    { minOn = 1, maxOn = 100, on = true, level = 50, color = { x = 0.3, y = 0.32, mode = "cct", kelvin = 6000 } }
++  )
++  take()
++end
++
++T.section("shown: ramp targets and detached full color while off")
++do
++  local p = make()
++  p:online(DEVICE)
++  p:sync(rest(true, 0.5, RED))
++  p:shown()
++  p:sync({ on = true, level = 0.5, levelTarget = 0.8, levelMs = 1000, color = RED, colorTarget = BLUE, colorMs = 1000 })
++  local shown = p:shown()
++  T.eq("the display carries the requested brightness", shown.level, 80)
++  T.eq("and the full color target", shown.color, BLUE)
++  shown.color.x = 99
++  T.eq("editing a returned color does not change the comparison cache", p:shown(), nil)
++  p:sync(rest(false, 0, RED))
++  shown = p:shown()
++  T.eq("an off light still exposes its selected full color", shown.color, RED)
++  T.eq("with an off brightness", { shown.on, shown.level }, { false, 0 })
+   take()
+ end
+ 
+diff --git a/tests/ui_page_js.test.mjs b/tests/ui_page_js.test.mjs
+index 3238d04..44b4b0d 100644
+--- a/tests/ui_page_js.test.mjs
++++ b/tests/ui_page_js.test.mjs
+@@ -283,3 +283,29 @@ test("esc makes text safe for HTML", () => {
+   assert.equal(Kit.str(0), "0");
+   assert.equal(Kit.str(undefined), "");
+ });
++
++
++test("request reads controller JSON with the existing Composer token or dev-login token", async () => {
++  for (const [search, token] of [[ON_CONTROLLER, "tok"], ["?apihost=ctrl.example.invalid&driverid=42", "dev-token"]]) {
++    const { Kit, posts } = load(search, { token, answer: () => [{ scene_id: 7 }] });
++    assert.deepEqual(plain(await Kit.request("GET", "/api/v1/agents/advanced_lighting")), [{ scene_id: 7 }]);
++    assert.equal(posts[0].opts.headers.Authorization, "Bearer " + token);
++    assert.equal(posts[0].url, "https://ctrl.example.invalid/api/v1/agents/advanced_lighting");
++  }
++});
++
++test("request rejects HTTP, JSON and network failures and never sends a token to another origin", async () => {
++  const { Kit, ctx, posts } = load(ON_CONTROLLER);
++  ctx.fetch = () => Promise.resolve({ ok: false, status: 401 });
++  await assert.rejects(Kit.request("GET", "/api/v1/items"), /HTTP 401/);
++  ctx.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new Error("bad JSON")) });
++  await assert.rejects(Kit.request("GET", "/api/v1/items"), /bad JSON/);
++  ctx.fetch = () => Promise.reject(new Error("offline"));
++  await assert.rejects(Kit.request("GET", "/api/v1/items"), /offline/);
++  for (const path of ["https://elsewhere.invalid/", "//elsewhere.invalid/"]) {
++    await assert.rejects(Kit.request("GET", path), /relative path/);
++  }
++  assert.equal(posts.length, 0);
++  ctx.fetch = () => Promise.resolve({ ok: true, status: 204 });
++  assert.equal(await Kit.request("DELETE", "/api/v1/items/7"), null);
++});

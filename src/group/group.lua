@@ -1,8 +1,8 @@
 --- The group's lights: which they are, what each can do and shows, the commands each is sent, and the one state the
 --- group reports for them all.
 ---
---- To the light model (group/light.lua) the group is one device. `Group.adapter()` is that device's adapter: a
---- command in the model's channel fields goes out to every light as Light V2 proxy commands, and the device's state
+--- To the shared light engine (lib/light.lua) the group is one device. `Group.adapter()` is that device's adapter: a
+--- command in the library's device fields goes out to every light as Light V2 proxy commands, and the device's state
 --- is the last command sent. Once the lights have settled, their own levels and colors are read back, and where they
 --- differ from what was sent (a light switched at the wall, a light that cannot reach the color), the group's state
 --- follows them as the tracking settings say.
@@ -14,11 +14,11 @@ require("drivers-common-public.global.timer")
 
 local log = require("lib.logging")
 local Aggregate = require("group.aggregate")
-local light = require("group.light")
+local Range = require("lib.light.range")
+
+local light -- attached by the driver after Light.new
 
 local Group = {}
-
-local ColorMode = light.ColorMode
 
 --- Light V2 proxy variables, read from each light.
 local VARIABLE = {
@@ -36,8 +36,6 @@ local COLOR_MODE_CCT = 1
 local DEFAULT_MIN_KELVIN = 2000
 local DEFAULT_MAX_KELVIN = 6500
 
---- The group's own command is answered this long after it, as a device would.
-local ECHO_MS = 20
 --- Reports from the lights within this of each other are read together.
 local FEEDBACK_DEBOUNCE_MS = 250
 local CONTROL_LOG_SIZE = 50
@@ -68,24 +66,16 @@ local settings = {
 --- @field sentKelvin number|nil The white last sent as a color to a light without color temperature.
 --- @field sentWhite { asked: number, sent: number }|nil The group's white last sent, and what this light was sent
 ---   for it on its own range.
+--- @field deviceColor table|nil The reported color before mapping it back onto the group's range.
+--- @field colorBusyUntil number|nil When the last dispatched color transition and its feedback have settled.
+--- @field groupJoined boolean|nil A protocol join was sent for this connection.
+--- @field groupProtocol boolean|nil Its join was answered with LIGHT_GROUP_STATE.
 
 --- @type Member[]
 local members = {}
 
---- The group's state as a device's, in the light model's channel fields.
-local vstate = {
-  state = false,
-  brightness = 0,
-  color_mode = ColorMode.COLOR_MODE_UNKNOWN,
-  color_brightness = 1,
-  red = 1,
-  green = 1,
-  blue = 1,
-  white = 0,
-  color_temperature = 0,
-  cold_white = 0,
-  warm_white = 0,
-}
+--- The virtual device's cached wire state: last sent, then reconciled with the members' reports.
+local vstate = { on = false, level = 0, color = nil }
 
 --- When the lights have settled after the group's last command (C4:GetTime, ms).
 local busyUntil = 0
@@ -93,6 +83,8 @@ local busyUntil = 0
 local levelBusyUntil, colorBusyUntil = 0, 0
 --- Whether the lights have been read into the group once, which Ignore still allows.
 local seeded = false
+--- The last wire send still needs the members' settled answer, even if they reach exactly its target.
+local pendingReport = false
 --- The lights changed by something other than the group since they were last read, for the others to follow one
 --- when kept in sync.
 local changedLights = {}
@@ -101,6 +93,10 @@ local followed = nil
 local queue = {}
 local controlLog = {}
 local onChange = function() end
+local commandSequence = 0
+local active = true
+local displayed -- the shared engine's UI snapshot; independent of cached member feedback
+local recordFeedback
 
 ---------------------------------------------------------------------------
 -- Helpers
@@ -110,82 +106,54 @@ local function isTrue(value)
   return value == true or (type(value) == "string" and value:lower() == "true")
 end
 
---- h 0-360, s and v 0-100, to r, g, b 0-1.
-local function hsvToRGB(h, s, v)
-  s, v = s / 100, v / 100
-  local c = v * s
-  local x = c * (1 - math.abs((h / 60) % 2 - 1))
-  local m = v - c
-  local r, g, b
-  if h < 60 then
-    r, g, b = c, x, 0
-  elseif h < 120 then
-    r, g, b = x, c, 0
-  elseif h < 180 then
-    r, g, b = 0, c, x
-  elseif h < 240 then
-    r, g, b = 0, x, c
-  elseif h < 300 then
-    r, g, b = x, 0, c
-  else
-    r, g, b = c, 0, x
-  end
-  return r + m, g + m, b + m
-end
-
---- r, g, b 0-1 to h 0-360 and s 0-100.
-local function rgbToHS(r, g, b)
-  local mx, mn = math.max(r, g, b), math.min(r, g, b)
-  local d = mx - mn
-  local h = 0
-  if d > 0 then
-    if mx == r then
-      h = 60 * (((g - b) / d) % 6)
-    elseif mx == g then
-      h = 60 * ((b - r) / d + 2)
-    else
-      h = 60 * ((r - g) / d + 4)
-    end
-  end
-  return h < 0 and h + 360 or h, mx > 0 and (d / mx) * 100 or 0
-end
-
 local function vLevel()
-  if not vstate.state then
-    return 0
-  end
-  return math.max(1, math.min(100, math.floor(vstate.brightness * 100 + 0.5)))
+  return vstate.on and Range.percent(vstate.level) or 0
 end
 
---- The group's color as the lights' colors are compared, or nil before it has one.
+--- The cached device color in the aggregation module's proxy representation.
 local function vColor()
-  if vstate.color_mode == ColorMode.COLOR_MODE_COLOR_TEMPERATURE and vstate.color_temperature > 0 then
-    local kelvin = 1e6 / vstate.color_temperature
-    local x, y = C4:ColorCCTtoXY(kelvin)
-    return { mode = COLOR_MODE_CCT, x = x, y = y, kelvin = kelvin }
-  elseif vstate.color_mode == ColorMode.COLOR_MODE_RGB then
-    local h, s = rgbToHS(vstate.red, vstate.green, vstate.blue)
-    local x, y = C4:ColorHSVtoXY(h, s, 100)
-    return { mode = COLOR_MODE_FULL, x = x, y = y }
-  end
+  local color = vstate.color
+  return color
+      and {
+        mode = color.mode == "cct" and COLOR_MODE_CCT or COLOR_MODE_FULL,
+        x = color.x,
+        y = color.y,
+        kelvin = color.kelvin,
+      }
+    or nil
 end
 
-local function record(member, command, params)
+local function record(member, command, params, outcome, sequence)
   local parts = {}
   for key, value in pairs(params or {}) do
     parts[#parts + 1] = key .. "=" .. tostring(value)
   end
   table.sort(parts)
   controlLog[#controlLog + 1] = string.format(
-    "%s  %s [%d]  %s %s",
+    "%s  t=%dms #%s  %s [%d]  %s %s %s",
     os.date("%Y-%m-%d %H:%M:%S"),
+    C4:GetTime(),
+    tostring(sequence or "-"),
     member.name,
     member.id,
     command,
+    outcome or "reported",
     table.concat(parts, " ")
   )
   while #controlLog > CONTROL_LOG_SIZE do
     table.remove(controlLog, 1)
+  end
+end
+
+recordFeedback = function(member, aspect, params)
+  if member.watched then
+    record(
+      member,
+      "FEEDBACK_" .. aspect:upper(),
+      params,
+      member.groupProtocol and "native" or "proxy",
+      aspect == "color" and member.lastColorCommand or member.lastLevelCommand
+    )
   end
 end
 
@@ -235,23 +203,19 @@ local function kelvinRange()
   return lo, hi
 end
 
---- The group as the light model's device: its color modes and color temperature range.
---- @return table entity
-function Group.entity()
+--- The group's capabilities and transport behavior, as the shared library's device.
+function Group.device()
   local dims, color, cct = abilities()
-  local modes = {}
-  if color then
-    modes[#modes + 1] = ColorMode.COLOR_MODE_RGB
-  end
-  if cct then
-    modes[#modes + 1] = ColorMode.COLOR_MODE_COLOR_TEMPERATURE
-  end
-  if #modes == 0 then
-    modes[1] = dims and ColorMode.COLOR_MODE_BRIGHTNESS or ColorMode.COLOR_MODE_ON_OFF
-  end
-  table.sort(modes)
   local lo, hi = kelvinRange()
-  return { supported_color_modes = modes, min_mireds = 1e6 / hi, max_mireds = 1e6 / lo }
+  return {
+    dims = dims,
+    color = color,
+    cct = cct and { minK = lo, maxK = hi } or nil,
+    colorWhileOff = "hold",
+    levelSteps = 100,
+    fade = { kind = "device", curve = "linear", preOn = false, retimes = false, maxMs = 86400000 },
+    feedback = { shows = "target", waitMs = settings.feedbackDelay, refresh = true },
+  }
 end
 
 ---------------------------------------------------------------------------
@@ -278,20 +242,27 @@ local function readCapabilities(member)
 end
 
 local function readLevel(member, value)
-  local level = tonumber(value)
+  local level = tofinite(value)
   if level then
     member.level = math.max(0, math.min(100, math.floor(level + 0.5)))
+    recordFeedback(member, "level", { LEVEL = member.level })
   end
 end
 
 local function readState(member, value)
   -- The level says more than on or off, so the state only fills in for a light with no level yet, or turns one off.
+  if value == nil or value == "" then
+    return
+  end
   local on = toboolean(value)
   if not on then
     member.level = 0
-  elseif (member.level or 0) == 0 then
-    member.level = tonumber(C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_LEVEL)) or 100
+  elseif member.dimmable == false then
+    member.level = 100
+  elseif member.level == nil or member.level == 0 then
+    readLevel(member, C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_LEVEL))
   end
+  recordFeedback(member, "level", { ON = on, LEVEL = member.level or "unknown" })
 end
 
 local function readColor(member, value)
@@ -303,6 +274,9 @@ local function readColor(member, value)
   local color = { mode = mode == COLOR_MODE_CCT and COLOR_MODE_CCT or COLOR_MODE_FULL, x = x, y = y }
   if color.mode == COLOR_MODE_CCT then
     color.kelvin = tonumber(C4:ColorXYtoCCT(x, y))
+  end
+  member.deviceColor = { mode = color.mode, x = x, y = y, kelvin = color.kelvin }
+  if color.mode == COLOR_MODE_CCT then
     -- The white this light was sent for the group's, mapped onto its own range, reads as the group's.
     local white = member.sentWhite
     if white and color.kelvin and math.abs(color.kelvin - white.sent) <= math.max(50, 0.02 * white.sent) then
@@ -317,6 +291,7 @@ local function readColor(member, value)
     end
   end
   member.color = color
+  recordFeedback(member, "color", { MODE = color.mode, X = x, Y = y, KELVIN = color.kelvin })
 end
 
 local evaluate
@@ -337,6 +312,9 @@ end
 --- @param member Member
 --- @param before string What it showed before the report.
 local function reported(member, before)
+  if not active then
+    return
+  end
   local now = showing(member)
   -- A report while the lights settle is the group's own command taking effect, but for the light the others are
   -- following: it may still be moving.
@@ -355,16 +333,25 @@ local function watch(member)
     end
   end
   RegisterVariableListener(member.id, VARIABLE.LIGHT_LEVEL, function(_, _, value)
+    if member.groupProtocol then
+      return
+    end
     local before = showing(member)
     readLevel(member, value)
     reported(member, before)
   end)
   RegisterVariableListener(member.id, VARIABLE.LIGHT_STATE, function(_, _, value)
+    if member.groupProtocol then
+      return
+    end
     local before = showing(member)
     readState(member, value)
     reported(member, before)
   end)
   RegisterVariableListener(member.id, VARIABLE.LIGHT_COLOR, function(_, _, value)
+    if member.groupProtocol then
+      return
+    end
     local before = showing(member)
     readColor(member, value)
     reported(member, before)
@@ -387,6 +374,9 @@ end
 
 local function readAll(member)
   readCapabilities(member)
+  if member.groupProtocol then
+    return
+  end
   pcall(function()
     readLevel(member, C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_LEVEL))
     if member.level == nil then
@@ -401,42 +391,58 @@ end
 ---------------------------------------------------------------------------
 
 local function pushState()
-  if #members == 0 then
+  if not light or #members == 0 then
     return
   end
-  local state = {}
-  for field, value in pairs(vstate) do
-    state[field] = value
+  light:declare(Group.device())
+  local report = { kind = "push", color = vstate.color }
+  if seeded then
+    report.on, report.level = vstate.on, vstate.level
   end
-  light.state(Group.entity(), state)
+  if seeded then
+    light:report(report)
+  end
 end
 
 local function setVColor(color)
-  if color.mode == COLOR_MODE_CCT and color.kelvin and color.kelvin > 0 then
-    vstate.color_mode = ColorMode.COLOR_MODE_COLOR_TEMPERATURE
-    vstate.color_temperature = 1e6 / color.kelvin
-  else
-    local h, s = C4:ColorXYtoHSV(color.x, color.y)
-    vstate.color_mode = ColorMode.COLOR_MODE_RGB
-    vstate.red, vstate.green, vstate.blue = hsvToRGB(h or 0, s or 0, 100)
-  end
+  vstate.color =
+    { mode = color.mode == COLOR_MODE_CCT and "cct" or "xy", x = color.x, y = color.y, kelvin = color.kelvin }
 end
 
 --- @return { total: integer, on: integer, inSync: boolean }
 function Group.status()
-  local on = 0
+  local on, known = 0, 0
   for _, member in ipairs(members) do
+    if member.level ~= nil then
+      known = known + 1
+    end
     if (member.level or 0) > 0 then
       on = on + 1
     end
   end
-  return { total = #members, on = on, inSync = Aggregate.inSync(members, vLevel()) }
+  return {
+    total = #members,
+    known = known,
+    on = on,
+    inSync = known == #members and Aggregate.inSync(members, vLevel()),
+  }
 end
 
 --- Reads the lights' own levels and colors into the group's state, once they have settled.
 --- @param force boolean|nil Read them now, and tell the light model even if nothing differs.
 evaluate = function(force)
   if #members == 0 then
+    return
+  end
+  local available = false
+  for _, member in ipairs(members) do
+    available = available or member.online ~= false
+  end
+  if not available then
+    if light and light.online then
+      light:lost(false)
+    end
+    onChange(Group.status())
     return
   end
   if not force and C4:GetTime() < busyUntil then
@@ -456,23 +462,21 @@ evaluate = function(force)
     return
   end
   local dims, color, cct = abilities()
-  local changed = force or false
-  -- A mode the group no longer has, after its lights or Light Type changed, is none.
-  if
-    (vstate.color_mode == ColorMode.COLOR_MODE_RGB and not color)
-    or (vstate.color_mode == ColorMode.COLOR_MODE_COLOR_TEMPERATURE and not cct)
-  then
-    vstate.color_mode = ColorMode.COLOR_MODE_UNKNOWN
+  local changed = force or pendingReport or (light and not light.online)
+  if vstate.color and ((vstate.color.mode == "xy" and not color) or (vstate.color.mode == "cct" and not cct)) then
+    vstate.color = nil
   end
   local commanded = vLevel()
   -- Ignore still reads the lights once, at start, for a level to show.
   local first = not seeded
-  seeded = true
   local tracking = settings.brightnessTracking
   if first and tracking == Aggregate.Brightness.IGNORE then
     tracking = Aggregate.Brightness.AVERAGE
   end
   local level = Aggregate.level(members, tracking, settings.trackedId, commanded)
+  if level ~= nil then
+    seeded = true
+  end
   if level and not dims and level > 0 then
     level = 100
   end
@@ -480,9 +484,9 @@ evaluate = function(force)
     level and (level > 0) ~= (commanded > 0) or (level and math.abs(level - commanded) > Aggregate.LEVEL_TOLERANCE)
   then
     log:debug("The lights are at %d%%; the group was at %d%%", level, commanded)
-    vstate.state = level > 0
+    vstate.on = level > 0
     if level > 0 then
-      vstate.brightness = level / 100
+      vstate.level = level / 100
     end
     changed = true
   end
@@ -504,6 +508,7 @@ evaluate = function(force)
     end
   end
   if changed then
+    pendingReport = false
     -- The status below is still shown if the light model raises.
     local ok, err = xpcall(pushState, debug.traceback)
     if not ok then
@@ -518,8 +523,30 @@ end
 ---------------------------------------------------------------------------
 
 local function dispatch(entry)
-  record(entry.member, entry.command, entry.params)
-  SendToDevice(entry.member.id, entry.command, entry.params)
+  local member, command, params = entry.member, entry.command, entry.params
+  local color = command == "SET_COLOR_TARGET" or (command == "LIGHT_GROUP_COMMAND" and params.X ~= nil)
+  local level = command ~= "SET_COLOR_TARGET" and not (command == "LIGHT_GROUP_COMMAND" and params.KIND == "color")
+  local priorLevel, priorColor = member.lastLevelCommand, member.lastColorCommand
+  if color then
+    member.lastColorCommand = entry.sequence
+  end
+  if level then
+    member.lastLevelCommand = entry.sequence
+  end
+  record(member, command, params, "send", entry.sequence)
+  local target = command == "LIGHT_GROUP_COMMAND" and member.protocolId or member.id
+  local ok, err = pcall(SendToDevice, target, command, params)
+  if not ok then
+    member.lastLevelCommand, member.lastColorCommand = priorLevel, priorColor
+    record(member, command, { ERROR = tostring(err) }, "failed", entry.sequence)
+    log:error("Command #%d to %s [%d] failed: %s", entry.sequence, member.name, target, tostring(err))
+    return false
+  end
+  if color then
+    member.colorBusyUntil = C4:GetTime() + (tonumber(params.RATE) or 0) + settings.feedbackDelay
+  end
+  record(member, command, {}, "sent", entry.sequence)
+  return true
 end
 
 --- Whether a command went out less than the command delay ago.
@@ -537,16 +564,40 @@ local function drain()
 end
 
 local function enqueue(member, command, params)
-  local entry = { member = member, command = command, params = params }
+  commandSequence = commandSequence + 1
+  local entry = { member = member, command = command, params = params, sequence = commandSequence }
+  record(member, command, params, "requested", entry.sequence)
   if settings.commandDelay <= 0 then
     dispatch(entry)
     return
   end
   -- A newer command of the same kind replaces one still waiting for the same light.
-  local kind = command == "SET_COLOR_TARGET" and "color" or "level"
+  local native = command == "LIGHT_GROUP_COMMAND"
+  local kind = (command == "SET_COLOR_TARGET" or (native and params.KIND == "color")) and "color" or "level"
+  if native then
+    -- Keep the latest queued level and color without losing an earlier combined color when only level changes.
+    for i = #queue, 1, -1 do
+      local waiting = queue[i]
+      if waiting.member == member and waiting.command == command then
+        if kind == "level" and (params.X or params.KIND == "off") and waiting.kind == "color" then
+          record(member, waiting.command, {}, "superseded", waiting.sequence)
+          table.remove(queue, i)
+        elseif kind == "color" and waiting.kind == "level" then
+          for _, key in ipairs({ "X", "Y", "KELVIN", "MODE" }) do
+            waiting.params[key] = nil
+          end
+        elseif kind == "level" and params.KIND ~= "off" and not params.X and waiting.kind == "level" then
+          for _, key in ipairs({ "X", "Y", "KELVIN", "MODE" }) do
+            params[key] = waiting.params[key]
+          end
+        end
+      end
+    end
+  end
   entry.kind = kind
   for i, waiting in ipairs(queue) do
     if waiting.member == member and waiting.kind == kind then
+      record(member, waiting.command, {}, "superseded", waiting.sequence)
       queue[i] = entry
       return
     end
@@ -557,21 +608,9 @@ local function enqueue(member, command, params)
   end
 end
 
---- The color a command asks for, or nil.
---- @return { kelvin: number }|{ x: number, y: number }|nil
-local function commandColor(cmd)
-  if cmd.has_color_temperature and (cmd.color_temperature or 0) > 0 then
-    return { kelvin = 1e6 / cmd.color_temperature }
-  elseif cmd.has_rgb then
-    local h, s = rgbToHS(cmd.red or 0, cmd.green or 0, cmd.blue or 0)
-    local x, y = C4:ColorHSVtoXY(h, s, 100)
-    return { x = x, y = y }
-  end
-end
-
-local function sendColor(member, color, rate)
+local function colorParams(member, color)
   local params
-  if color.kelvin then
+  if color.mode == "cct" and color.kelvin then
     local groupMin, groupMax = kelvinRange()
     if member.supportsCCT then
       local kelvin =
@@ -593,10 +632,38 @@ local function sendColor(member, color, rate)
   elseif member.supportsColor then
     member.sentKelvin = nil
     member.sentWhite = nil
-    params =
-      { LIGHT_COLOR_TARGET_X = color.x, LIGHT_COLOR_TARGET_Y = color.y, LIGHT_COLOR_TARGET_MODE = COLOR_MODE_FULL }
+    params = {
+      LIGHT_COLOR_TARGET_X = color.x,
+      LIGHT_COLOR_TARGET_Y = color.y,
+      LIGHT_COLOR_TARGET_MODE = COLOR_MODE_FULL,
+    }
   end
+  return params
+end
+
+local function sendColor(member, color, rate, onlyIfChanged)
+  local params = colorParams(member, color)
   if params then
+    -- A color command can turn an off light on at its own rate before the following brightness ramp reaches it.
+    -- Compare on the light's own range, and only skip a settled color: a queued or moving color still needs replacing.
+    if onlyIfChanged and C4:GetTime() >= (member.colorBusyUntil or 0) then
+      local pending = false
+      for _, entry in ipairs(queue) do
+        pending = pending or (entry.member == member and entry.command == "SET_COLOR_TARGET")
+      end
+      local target = {
+        mode = params.LIGHT_COLOR_TARGET_MODE,
+        x = params.LIGHT_COLOR_TARGET_X,
+        y = params.LIGHT_COLOR_TARGET_Y,
+        kelvin = params.LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE,
+      }
+      if target.kelvin then
+        target.x, target.y = C4:ColorCCTtoXY(target.kelvin)
+      end
+      if not pending and Aggregate.sameColor(member.deviceColor, target) then
+        return
+      end
+    end
     params.RATE = rate
     enqueue(member, "SET_COLOR_TARGET", params)
   end
@@ -617,62 +684,69 @@ local function sendLevel(member, level, rate, plainOn)
   end
 end
 
---- A command from the light model, in its channel fields.
---- @param except Member|nil A light already showing what is sent.
-local function send(cmd, except)
-  -- The model lights a fading-on device dimly first so a change of color mode does not show. The lights fade up
-  -- by themselves, and the command that follows carries the same color.
-  if cmd.preOn then
+--- A confirmed template member accepts the final brightness and mapped color together.
+local function sendCombined(member, level, color, rate)
+  local mapped = color and colorParams(member, color) or nil
+  if level == nil and not mapped then
     return
   end
-  local rate = math.max(0, math.floor((cmd.transition_length or 0) + 0.5))
-  local wasOn = vstate.state
-
-  local level, plainOn
-  if cmd.has_state and cmd.state == false then
-    -- A color set while the group is off names the off again; the lights are not sent it.
-    if wasOn or not (cmd.has_rgb or cmd.has_color_temperature or cmd.has_color_mode) then
-      level = 0
+  local params = {
+    GROUP_ID = tostring(C4:GetDeviceID()),
+    KIND = level ~= nil and (level > 0 and "level" or "off") or "color",
+    LEVEL = level ~= nil and tostring(level) or nil,
+    RATE = tostring(level == 0 and settings.offCommand == "Off" and 0 or rate),
+  }
+  if mapped then
+    params.X, params.Y = mapped.LIGHT_COLOR_TARGET_X, mapped.LIGHT_COLOR_TARGET_Y
+    params.KELVIN = mapped.LIGHT_COLOR_TARGET_COLOR_CORRELATED_TEMPERATURE
+    if params.KELVIN then
+      params.X, params.Y = C4:ColorCCTtoXY(params.KELVIN)
     end
-    vstate.state = false
-  elseif cmd.has_brightness then
-    level = math.max(1, math.min(100, math.floor((cmd.brightness or 1) * 100 + 0.5)))
-    vstate.state = true
-    vstate.brightness = cmd.brightness or 1
-  elseif cmd.has_state and cmd.state and not (cmd.has_rgb or cmd.has_color_temperature or cmd.has_color_mode) then
-    -- Also for a group that reads as on: some of its lights may be off.
-    level, plainOn = 100, true
-    vstate.state = true
-    vstate.brightness = 1
-  end
-
-  for _, field in ipairs({ "color_mode", "color_brightness", "red", "green", "blue", "white", "color_temperature" }) do
-    if cmd[field] ~= nil then
-      vstate[field] = cmd[field]
+    params.X, params.Y = tostring(params.X), tostring(params.Y)
+    params.MODE = mapped.LIGHT_COLOR_TARGET_MODE == COLOR_MODE_CCT and "cct" or "xy"
+    if params.KELVIN then
+      params.KELVIN = tostring(params.KELVIN)
     end
+    member.colorBusyUntil = C4:GetTime() + rate + settings.feedbackDelay
   end
+  enqueue(member, "LIGHT_GROUP_COMMAND", params)
+end
 
-  -- A color temperature sent without a mode moves a device that is showing a color to its white mode.
-  if cmd.has_color_temperature and not cmd.has_color_mode then
-    vstate.color_mode = ColorMode.COLOR_MODE_COLOR_TEMPERATURE
+--- One command from the shared engine, translated to each member's Light V2 transport.
+local function send(cmd, except)
+  if cmd.kind == "preOn" then
+    return
   end
-
-  -- A color set while the group is off is the color it next comes on in: the model sends it again with that on,
-  -- so the lights are not sent it now, when some would turn on for it.
-  local color = vstate.state and commandColor(cmd) or nil
+  local rate = math.max(0, math.floor((cmd.transitionMs or 0) + 0.5))
+  local wasOn = vstate.on
+  local level = cmd.setsLevel and (cmd.on and Range.percent(cmd.level) or 0) or nil
+  local plainOn = level and level > 0 and not abilities()
+  vstate.on, vstate.level = cmd.on, cmd.level
+  if cmd.color then
+    vstate.color = cmd.color
+  end
+  -- Color while off is held by lib.light. A color alone leaves an individually off member off.
+  local color = cmd.setsColor and cmd.on and cmd.color or nil
   for _, member in ipairs(members) do
     if member ~= except then
-      -- A light that is off by itself while the group is on is left off: some turn on for a color.
-      if color and (level or member.level ~= 0) then
-        -- A light that is off takes its color at once, then fades up in it.
-        sendColor(member, color, (member.level or 0) > 0 and wasOn and rate or 0)
+      local memberColor = color and (level or member.level ~= 0) and color or nil
+      -- A group that already reads On can contain an off member. Rejoining it also restores the group's color;
+      -- the engine correctly carries that color without marking a color change on the group itself.
+      if level and level > 0 and member.level == 0 and cmd.color then
+        memberColor = cmd.color
       end
-      if level then
-        sendLevel(member, level, rate, plainOn)
+      if member.groupProtocol and not plainOn then
+        sendCombined(member, level, memberColor, rate)
+      else
+        if memberColor then
+          sendColor(member, memberColor, (member.level or 0) > 0 and wasOn and rate or 0, level ~= nil and rate > 0)
+        end
+        if level then
+          sendLevel(member, level, rate, plainOn)
+        end
       end
     end
   end
-
   local settled = C4:GetTime() + rate + settings.commandDelay * #queue + settings.feedbackDelay
   if level then
     levelBusyUntil = settled
@@ -680,39 +754,78 @@ local function send(cmd, except)
   if color then
     colorBusyUntil = settled
   end
-  if not level and not color then
-    levelBusyUntil = math.max(levelBusyUntil, settled)
-  end
   busyUntil = math.max(levelBusyUntil, colorBusyUntil)
-  SetTimer("GroupEcho", ECHO_MS, pushState)
+  pendingReport = true
+  seeded = true
   scheduleFeedback()
 end
 
---- The group as the light model's device.
---- @return table adapter
+--- Attach the light made once by the driver's top-level chunk.
+function Group.attach(instance)
+  light, active = instance, true
+  EC.LIGHT_GROUP_STATE = function(params)
+    if not active then
+      return
+    end
+    local id = tointeger(Select(params, "MEMBER_ID"))
+    for _, member in ipairs(members) do
+      if member.id == id and member.groupJoined then
+        -- Only a reply to this connection's join confirms the custom protocol. A generic load-group capability
+        -- alone does not: ordinary Light V2 drivers keep the standard transport.
+        member.groupProtocol = true
+        member.online = toboolean(Select(params, "ONLINE"))
+        local before = showing(member)
+        if toboolean(Select(params, "ON")) then
+          readLevel(member, Select(params, "LEVEL"))
+        else
+          member.level = 0
+        end
+        local x, y = tonumber(Select(params, "X")), tonumber(Select(params, "Y"))
+        if x and y then
+          readColor(member, x .. "," .. y .. "," .. (Select(params, "MODE") == "cct" and "1" or "0"))
+        end
+        reported(member, before)
+        return
+      end
+    end
+  end
+end
+
+function Group.profile()
+  return {
+    api = 1,
+    links = { top = 300, toggle = 301, bottom = 302 },
+    dims = true,
+    color = true,
+    cct = true,
+    fades = true,
+    maxMs = 86400000,
+    defaultOn = true,
+    scenes = true,
+    onModes = true,
+    flash = true,
+  }
+end
+
 function Group.adapter()
   return {
-    send = send,
-    -- Lights ramp evenly, so a stop mid-ramp finds them a like share of the way.
-    curve = function(p)
-      return p
+    send = function(_, cmd)
+      return send(cmd)
     end,
-    -- A level the group shows that some of its lights are not at is still sent.
-    apart = function(level)
-      for _, member in ipairs(members) do
-        local own = Aggregate.memberLevel(member, level)
-        if
-          own
-          and (
-            (own > 0) ~= (level > 0) or (member.dimmable ~= false and math.abs(own - level) > Aggregate.LEVEL_TOLERANCE)
-          )
-        then
-          return true
-        end
+    refresh = function()
+      if #members == 0 then
+        return
       end
-      return false
+      if C4:GetTime() < busyUntil then
+        scheduleFeedback()
+      else
+        evaluate(true)
+      end
     end,
-    capabilities = { has_extras = false, brightness_rate_max = 86400000, color_rate_max = 86400000 },
+    show = function(_, shown)
+      displayed = shown
+      onChange(Group.status())
+    end,
   }
 end
 
@@ -723,8 +836,8 @@ end
 --- Tells the light model what the group is and shows now, after its lights or settings changed.
 function Group.refresh()
   if #members == 0 then
-    if light.isOnline() then
-      light.disconnect()
+    if light and light.online then
+      light:lost(false)
     end
     onChange(Group.status())
     return
@@ -753,13 +866,63 @@ function Group.setMembers(devices)
     now[#now + 1] = member
   end
   for _, member in pairs(kept) do
+    if member.groupJoined then
+      local ok, err =
+        pcall(SendToDevice, member.protocolId, "LIGHT_GROUP_LEAVE", { GROUP_ID = tostring(C4:GetDeviceID()) })
+      if not ok then
+        log:warn("Leaving %s's native group failed: %s", member.name, tostring(err))
+      end
+    end
     unwatch(member)
   end
   members = now
+  -- Install the complete list before joins: a compatible member may answer synchronously.
+  for _, member in ipairs(members) do
+    if not member.groupJoined then
+      -- Native commands belong to the protocol driver; feedback variables belong to the selected proxy.
+      local ok, devices = pcall(C4.GetDevices, C4, { DeviceIds = tostring(member.id) })
+      local device = ok and type(devices) == "table" and (devices[member.id] or devices[tostring(member.id)])
+      member.protocolId = member.id
+      for id in pairs(type(device) == "table" and device.protocol or {}) do
+        member.protocolId = tointeger(id) or member.id
+        break
+      end
+      member.groupJoined = true
+      local joined, err = pcall(
+        SendToDevice,
+        member.protocolId,
+        "LIGHT_GROUP_JOIN",
+        { GROUP_ID = tostring(C4:GetDeviceID()), MEMBER_ID = tostring(member.id) }
+      )
+      if not joined then
+        member.groupJoined = false
+        log:warn(
+          "Joining %s's native group failed: %s; standard Light V2 remains available",
+          member.name,
+          tostring(err)
+        )
+      end
+    end
+  end
   queue = {}
   spacing = false
   CancelTimer("GroupQueue")
   Group.refresh()
+end
+
+--- End this instance's transport work before Director unloads it. No device or proxy commands go out.
+function Group.stop()
+  active = false
+  for _, name in ipairs({ "GroupQueue", "GroupFeedback", "GroupProbe" }) do
+    CancelTimer(name)
+  end
+  queue, spacing, changedLights, followed = {}, false, {}, nil
+  for _, member in ipairs(members) do
+    unwatch(member)
+  end
+  if light then
+    light:stop()
+  end
 end
 
 --- Changes the group's settings.
@@ -795,20 +958,17 @@ function Group.follow(source)
     return false
   end
   log:debug("%s changed; the other lights follow it", source.name)
-  local cmd = { has_state = true, state = level > 0, has_transition_length = true, transition_length = 0 }
-  if level > 0 and dims then
-    cmd.has_brightness, cmd.brightness = true, level / 100
-  elseif level > 0 then
-    -- Read as a plain on.
-    vstate.state = false
-  end
-  if colorDiffers and shown.mode == COLOR_MODE_CCT and shown.kelvin then
-    cmd.has_color_temperature, cmd.color_temperature = true, 1e6 / shown.kelvin
-  elseif colorDiffers then
-    local h, s = C4:ColorXYtoHSV(shown.x, shown.y)
-    cmd.has_rgb = true
-    cmd.red, cmd.green, cmd.blue = hsvToRGB(h or 0, s or 0, 100)
-    cmd.has_color_mode, cmd.color_mode = true, ColorMode.COLOR_MODE_RGB
+  local cmd = {
+    kind = "change",
+    on = level > 0,
+    level = level / 100,
+    setsLevel = true,
+    setsColor = colorDiffers,
+    transitionMs = 0,
+  }
+  if colorDiffers then
+    cmd.color =
+      { mode = shown.mode == COLOR_MODE_CCT and "cct" or "xy", x = shown.x, y = shown.y, kelvin = shown.kelvin }
   end
   send(cmd, source)
   followed = source
@@ -828,22 +988,15 @@ function Group.sync()
   if #members == 0 then
     return
   end
-  local cmd = { has_state = true, state = vstate.state, has_transition_length = true, transition_length = 0 }
-  if vstate.state then
-    local dims = abilities()
-    if dims then
-      cmd.has_brightness, cmd.brightness = true, vstate.brightness
-    else
-      -- Read as a plain on.
-      vstate.state = false
-    end
-    if vstate.color_mode == ColorMode.COLOR_MODE_COLOR_TEMPERATURE then
-      cmd.has_color_temperature, cmd.color_temperature = true, vstate.color_temperature
-    elseif vstate.color_mode == ColorMode.COLOR_MODE_RGB then
-      cmd.has_rgb, cmd.red, cmd.green, cmd.blue = true, vstate.red, vstate.green, vstate.blue
-    end
-  end
-  send(cmd)
+  send({
+    kind = "change",
+    on = vstate.on,
+    level = vstate.level,
+    color = vstate.color,
+    setsLevel = true,
+    setsColor = vstate.color ~= nil,
+    transitionMs = 0,
+  })
 end
 
 --- @param callback fun(status: { total: integer, on: integer, inSync: boolean }) Called after the lights are read.
@@ -937,6 +1090,10 @@ function Group.snapshot()
   local dims, color, cct = abilities()
   local lo, hi = kelvinRange()
   local shown = vColor()
+  if displayed and displayed.color then
+    local c = displayed.color
+    shown = { x = c.x, y = c.y, mode = c.mode == "cct" and COLOR_MODE_CCT or COLOR_MODE_FULL, kelvin = c.kelvin }
+  end
   local lights = {}
   for _, member in ipairs(members) do
     lights[#lights + 1] = {
@@ -949,6 +1106,7 @@ function Group.snapshot()
       minKelvin = member.minKelvin,
       maxKelvin = member.maxKelvin,
       level = member.level,
+      inSync = Aggregate.memberInSync(member, vLevel(), shown),
       kelvin = member.color and member.color.kelvin and math.floor(member.color.kelvin + 0.5) or nil,
       x = member.color and member.color.x or nil,
       y = member.color and member.color.y or nil,
@@ -959,7 +1117,7 @@ function Group.snapshot()
     total = status.total,
     on = status.on,
     inSync = status.inSync,
-    level = vLevel(),
+    level = seeded and vLevel() or nil,
     kelvin = shown and shown.kelvin and math.floor(shown.kelvin + 0.5) or nil,
     x = shown and not shown.kelvin and shown.x or nil,
     y = shown and not shown.kelvin and shown.y or nil,

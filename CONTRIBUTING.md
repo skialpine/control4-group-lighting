@@ -36,7 +36,11 @@ then pull the change in with `copier update`.
 **Common libraries (`src/lib/`):**
 
 - `bindings.lua`: binding management
-- `conditionals.lua`: conditional/programming UI management
+- `companions.lua`: gives each of a hub driver's bindings a companion driver,
+  one at a time: the one it had, a spare, or a new one, named and shown only in
+  its room
+- `conditionals.lua`: conditional/programming UI management; gives each one a
+  `sort_order`
 - `driver-filenames.lua`: every `.c4z` the repo builds, written in by the build
 - `drivercentral.lua`: the DriverCentral product, its cloud client and the
   license gate (see [The License Gate](#the-license-gate))
@@ -47,7 +51,8 @@ then pull the change in with `copier update`.
   [Log Level](#log-level))
 - `lru.lua`: LRU cache utility
 - `persist.lua`: persistent storage abstraction
-- `redact.lua`: masks credentials in log lines and diagnostics reports
+- `redact.lua`: masks credentials in log lines below Ultra and in diagnostics
+  reports
 - `support-code.lua`: the Support Code that opens a DriverCentral build's Lua
   window (see [The Support Code](#the-support-code))
 - `update-settings.lua`: keeps Automatic Updates and Update Channel the same on
@@ -58,6 +63,8 @@ then pull the change in with `copier update`.
 - `values.lua`: value parsing, coercion, and formatting
 - `ui/`: the kit for a custom Composer tab (see
   [Custom Composer Tabs](#custom-composer-tabs))
+- `light.lua` and `light/`: the Light V2 library, which a light driver is an
+  adapter over (see [Writing a Light Driver](#writing-a-light-driver))
 - `github-updater.lua`: GitHub Releases self-updater (OSS builds)
 
 **Vendor libraries (`vendor/`):**
@@ -90,6 +97,10 @@ then pull the change in with `copier update`.
 - `requirements.txt`, the build-time Python dependency list
 - `test/testlib.lua`, `test/c4_fixtures.lua`, `test/c4_shim.lua`,
   `test/run_test.sh`, and the `test/test_*.lua` suites covering shared code
+- `test/light_proxy_fake.lua`, `test/light_rig.lua`, `test/light_group_rig.lua`,
+  `test/light_drivers.lua`, `test/light_conformance.lua`,
+  `test/test_light_conformance.lua`, `test/light_contract_cases.lua` and
+  `test/light_setup/`, the Light V2 conformance kit, and `tools/light-caps.lua`
 - `.copier-answers.yml`, which Copier maintains; never edit it by hand
 
 ### What's Driver-Specific (Yours to Edit)
@@ -184,8 +195,9 @@ make build-nodocs  # Build without generating docs
 make verify        # After a build, check what CI checks after one
 make test          # Run the Lua test suite (test/test_*.lua) and tools/test_*.py
 make support-code  # Print today's Support Code (see The Support Code)
+make dc-release    # Download the newest release's DriverCentral upload (TAG=v... for another)
 make fmt           # Format all code (Lua, Python, Markdown)
-make check         # Assert formatting and build secrets without rewriting, as CI does
+make check         # Assert formatting, docs list spacing, build secrets and conditional sort_order, as CI does
 make clean         # Remove build artifacts and dist/ (including driverpackager)
 make clean-all     # Remove everything (build artifacts, dist, deps, venv)
 ```
@@ -203,7 +215,9 @@ on a clean tree until something has populated `build/`.
 `make build` runs these in order, starting from a cleaned `build/`:
 
 1. **Format**: stylua (Lua), black (Python), mdformat (Markdown)
-1. **Preprocess**: resolve `#ifdef`/`#ifndef` directives per distribution
+1. **Preprocess**: resolve `#ifdef`/`#ifndef` directives per distribution. In
+   Markdown, where a removed directive sat between two list items, the list
+   keeps its own spacing; `make check` fails on a built list spaced unevenly
 1. **Generate squishy**: create squish manifests from .c4zproj files
 1. **Update driver.xml**: stamp version date and modified timestamp
 1. **Generate docs**: Markdown -> HTML -> PDF, plus README and DriverCentral's
@@ -230,8 +244,16 @@ zip and the PDFs. `description.html` is the listing's description, made from
 Revisions tab, every released `CHANGELOG.md` section as the DriverCentral build
 shows it. The product card, the banners and the listing photos are copied from
 `resources/drivercentral/`. A tag build's drivercentral CI artifact is the whole
-upload. When it has expired, run the Build workflow on the tag again from the
-Actions tab.
+upload. `make dc-release` downloads the newest release's into
+`dist/release/<tag>/`, or another's with `TAG=v20261111`, and stops if any
+`.c4z` in it is not encrypted. It needs the GitHub CLI, signed in. When the
+artifact has expired, run the Build workflow on the tag again from the Actions
+tab.
+
+While `description.md` still has `FACTS-STRIP-URL` for the facts strip,
+`description.html` leaves the strip out and the build prints a warning. Upload
+`banners/facts-strip-2400x136.png` through DriverCentral's description editor
+and put the URL it gives in its place.
 
 Step 1 rewrites tracked files in place. Formatting covers `tools/*.py`, all Lua
 under `drivers/`, `src/`, `test/`, `tools/` and `vendor/`, and every Markdown
@@ -331,6 +353,10 @@ runs `fn` with `print` collected and returns `ok, err, output`, and
 - `F.dofileBuild(path, build)` runs a Lua file as the `"drivercentral"` or
   `"oss"` build compiles it, with its `#ifdef` blocks applied. A driver loaded
   raw runs every arm.
+- `F.virtualClock(opts)` runs `C4:SetTimer` and `C4:GetTime` on a virtual clock,
+  so a test plays minutes of timers at once and in a fixed order. Drive it with
+  `run(ms)` and `at(ms, fn)`, read `now()` and `errors` (what a timer or promise
+  callback threw), then `restore()`.
 
 ### Persisted values
 
@@ -366,6 +392,47 @@ it. Neither runner needs telling about them: `make test` collects only
 resolves on its own.
 
 Promote either one into the template only once a second driver needs it.
+
+## Writing a Light Driver
+
+`src/lib/light.lua` owns the Light V2 proxy and the Button Links: their commands
+and notifications, presets, on modes, Dim-To-Warm, scenes, fades, and what the
+proxy is told. `src/lib/light/types.lua` is the contract: what a driver gives
+the library and what it gets back. A light driver gives it four things:
+
+- A profile, once: what the driver offers the proxy. The build writes
+  `driver.xml`'s light capabilities from it (`tools/light-caps.lua`), so
+  `driver.xml` carries none of them. Just above its `<capabilities>` element it
+  carries this line instead, and the build stops without it:
+  `<!-- The light's capabilities are the build's, written from the profile the driver gives Light.new. -->`
+- An adapter with `send`, `refresh` and `show`: it puts each command on its
+  transport, asks the device for its whole state, and mirrors what the proxy
+  shows on a device page.
+- `light:declare(device)` on each connection, before its first report: what this
+  device can do, how it fades, and how its reports behave.
+- `light:report(report)` for every device state, and `light:lost(suspended)`
+  when the connection goes.
+
+`Light.new(adapter, profile)` runs once, at the driver chunk's top level.
+`light:start()` runs in `OnDriverLateInit`, and `light:reset()` from Reset
+Driver.
+
+`test/test_light_conformance.lua` proves each light driver over the repo's own
+`test/light_rigs.lua`, written to the rig interface in `test/light_rig.lua`.
+Each rig loads its driver as it ships and fakes only its transport, and the
+cases in `test/light_conformance.lua` judge what a fake proxy
+(`test/light_proxy_fake.lua`) is told and where the device ends. A light group
+driver's rig is `test/light_group_rig.lua`'s `rig(name, property)`: two fake
+member lights behind the group as it ships. A repo with no light driver and no
+rigs passes with a note.
+
+`test/light_contract_cases.lua` holds named scenarios with the exact commands
+the library sends an adapter for each. An adapter's own wire test feeds those
+commands to its `send` and checks what goes on the wire.
+
+The library, its kit and its cases are the template's: a change to them goes to
+the template, where its own tests and fuzzer run, and reaches each repo at its
+next `copier update`.
 
 ### Tools tests
 
@@ -453,9 +520,9 @@ security add-generic-password -s control4-driver-build -a NAME -w
 In CI, the Build workflow passes `make build` each build secret by name from the
 repository's GitHub Actions secrets (add each name under Settings > Secrets and
 variables > Actions), so `make build` and the tools it runs never see any other
-secret. The template passes its own: `SUPPORT_CODE_SECRET` with a DriverCentral
-build, and the four `INFLUXDB_*` with Cloud Monitoring. A driver's own go in the
-copier answer `extra_build_secrets`
+secret. The template passes its own: `SUPPORT_CODE_SECRET`, `SUPPORT_PHONE` and
+`SUPPORT_EMAIL` with a DriverCentral build, and the four `INFLUXDB_*` with Cloud
+Monitoring. A driver's own go in the copier answer `extra_build_secrets`
 (`uvx copier update --trust --data extra_build_secrets="NAME OTHER"`), and
 `make check` fails when `.env.default` and the workflow disagree. Each value is
 a single line.
@@ -470,7 +537,16 @@ encrypted (`encryption="2"` on its `<script>`, set in the build copy of
 `driver.xml`), and `make package` deletes the plain-text squished Lua in
 `dist/<build>/source`, so neither the `.c4z` nor a CI artifact carries the value
 in the clear. Only `build/` keeps it, and that is gitignored and never uploaded.
-Keep placeholders out of documentation: a PDF is not encrypted.
+Keep placeholders out of documentation, since a PDF is not encrypted. The two
+exceptions are the support contacts a DriverCentral build's docs give, which are
+meant to be read: the secret only keeps them out of the repository. Write the
+phone number as `[%%SUPPORT_PHONE%%](tel:__SUPPORT_PHONE__)` and the email
+address as `[%%SUPPORT_EMAIL%%](mailto:__SUPPORT_EMAIL__)`, each inside
+`#ifdef DRIVERCENTRAL`. The link takes the `__NAME__` form, since mdformat
+escapes a `%` in a link. Set `SUPPORT_PHONE` with dashes, `+1-NNN-NNN-NNNN`, so
+it also makes the `tel:` link. Only the docs and their PDFs give the contacts.
+The README comes from the OSS docs, which never show them, and the listing
+description, `resources/drivercentral/description.md`, gives neither.
 
 A DriverCentral build is packaged encrypted with or without a secret.
 `make package` then opens every package of an encrypted build and fails unless
@@ -583,8 +659,10 @@ end
 The library clears the property at once, keeps its value out of the dispatcher's
 Trace output, and prints its answer to the Lua output whatever Log Mode is.
 While the window is open, Log Level also offers Trace and Ultra (see
-[Log Level](#log-level)). A driver that shows more while the window is open
-(extra properties) passes `supportCode:onChange(function(open) ... end)`.
+[Log Level](#log-level)). A web tab's properties card follows the window by
+itself, once the driver calls `lib.ui.tab-properties`' `serve()`. A driver that
+shows more elsewhere while the window is open passes
+`supportCode:onChange(function(open) ... end)`.
 
 ### Log Level
 
@@ -623,15 +701,35 @@ otherwise. Nothing else sets them. The Support Code calls
 and narrows the list. A page that sets Log Level offers
 `log:getLogLevelNames()`.
 
+Below Ultra, a log line of ours masks credentials through `redact.forLog`, as
+`lib.http`'s request line does. At Ultra it prints them as they are, as the
+dumps do. Anything that leaves the controller, a Cloud Monitoring report among
+them, masks through `redact.value` at every level. The Support Code and what
+`SendSecretToDevice` and `SendSecretToProxy` send stay out of the log at every
+level.
+
 ### Custom Composer Tabs
 
-`src/lib/ui/` is the kit for a driver's custom Composer tab: the shared look
-(`style.css`), the page's link to its driver, the tab bar, demo mode and a card
-of the driver's properties (`page.js`), and the driver's side of that card
-(`lib.ui.tab-properties` and `lib.ui.page-params`).
+`src/lib/ui/` holds everything a driver's custom Composer tab shares with the
+others, so a page keeps only its own views and its driver only its own commands:
 
-A page embeds the stylesheet first in its `<style>` and the script first in its
-`<script>`, then adds its own:
+- `style.css`: the house look, from the tab bar and cards to form fields,
+  tables, chips, the segmented switch and a list beside its editor, and a set of
+  `.kit-*` widgets and layout helpers to use as needed, as with a CSS framework:
+  states, tags, counts, a form grid, a switch, popovers and more
+- `page.js`: the page's link to its driver, the live-link and demo banners, the
+  tabs, the properties card and demo mode
+- `variables.js` and `variables.css`: the variable browser, with
+  `lib.ui.devices` on the driver's side
+- `collapse.js`, `menu.js`, `combobox.js`, `color.js` and `pickgrid.js`, each
+  with its stylesheet: groups that fold with Expand all, a button with a menu, a
+  searchable dropdown, a color picker, and a picture grid with a drop zone
+- `lib.ui.page`, `lib.ui.page-params` and `lib.ui.tab-properties`: the driver's
+  side of the link and the properties card
+
+Each file's header comment lists what it offers. A page embeds the stylesheets
+in its `<style>` and the scripts in its `<script>`, the kit's first, then adds
+its own:
 
 ```html
 <style>
@@ -640,52 +738,53 @@ A page embeds the stylesheet first in its `<style>` and the script first in its
 <div class="nav">
   <div class="nav-tab active" data-panel="status">Status</div>
 </div>
-<div class="banner warn" id="conn-warn" hidden>Not connected to the controller. Open this tab from Composer. The values shown are examples.</div>
 <div class="panel active" id="panel-status">
+  <div class="card"><h3>Status</h3><div id="status"></div></div>
   <div class="card" hidden><h3>Properties</h3><div id="props"></div></div>
 </div>
 <script>
 <!-- #embed ../../../../src/lib/ui/page.js -->
-Kit.initTabs();
+function showStatus(status) {
+  document.getElementById("status").textContent = status.text;
+}
+Kit.initTabs(null, { hash: true });
 Kit.initPropertiesCard(document.getElementById("props"));
+// Outside Composer, this stands in for the driver.
 Kit.demoMode(function (command) {
-  if (command === "_GET_CONFIG") Kit.deliver("CONFIG_DATA", { properties: "[]" });
+  if (command === "_GET_STATUS") Kit.deliver("STATUS", { text: "Connected" });
 });
-Kit.connectDriver({ onConnect: function () { Kit.sendCommand("_GET_CONFIG"); } });
+Kit.connectDriver({
+  handlers: { STATUS: showStatus },
+  onConnect: function () { Kit.sendCommand("_GET_STATUS"); },
+});
 </script>
 ```
 
-Everything `page.js` offers is on one object, `Kit`, so a page's own function of
-the same name never replaces the kit's; alias the names you use often
-(`var sendCommand = Kit.sendCommand;`). `style.css` styles the shared base, tab
-bar, cards, buttons and banner, and otherwise only its own `.kit-*` markup, so a
-page keeps its own styles for labels, inputs, tables and the like.
-
-The build splices both files in, so each `.c4z` ships one self-contained page;
-open the built page in `build/<distribution>/drivers/<name>/www/html/` to see
-it. The tab bar shows from two tabs. Opened outside Composer, the page shows the
-`#conn-warn` banner and the demo data its `Kit.demoMode` answer gives, which is
-what the documentation's screenshots are taken from.
-
-The driver answers the card's two commands:
+and its driver answers:
 
 ```lua
+local page = require("lib.ui.page")
 local pageParams = require("lib.ui.page-params")
-local tabProperties = require("lib.ui.tab-properties")
+require("lib.ui.tab-properties"):serve()
 
-function UIR._GET_CONFIG()
-  C4:SendDataToUI("CONFIG_DATA", { properties = JSON:encode(tabProperties:list()) })
+function UIR._GET_STATUS()
+  page.send("STATUS", { text = Properties["Driver Status"] })
 end
 
-function UIR._SET_PROPERTY(tParams)
+function UIR._SET_MODE(tParams)
   local params = pageParams(tParams)
-  local err = tabProperties:set(params.property, params.value)
-  if err then
-    C4:SendDataToUI("PROPERTY_ERROR", { payload = JSON:encode({ property = params.property, error = err }) })
-  end
+  -- params.mode is what the page sent
 end
 ```
 
-and, at the end of `OnDriverLateInit`, `tabProperties:follow(UIR._GET_CONFIG)`,
-so a change made in Composer reaches the open tab. Decode every other command's
-parameters with `pageParams` too: the page breaks them into lines.
+A page restyles nothing the kit styles: `test/test_ui_pages.lua` fails one that
+does, so a better look goes into the kit for every tab.
+
+The build splices the files in, so each `.c4z` ships one self-contained page;
+open the built page in `build/<distribution>/drivers/<name>/www/html/` to see
+it. Opened outside Composer, the page shows the demo banner and the data its
+`Kit.demoMode` answer gives, which is what the documentation's screenshots are
+taken from. Opened with a controller address but no token, an OSS build logs in
+through the dev proxy's saved login (`tools/dev/c4proxy.py` where a repo has
+one), so a live check needs nothing typed; the DriverCentral build has no such
+login.

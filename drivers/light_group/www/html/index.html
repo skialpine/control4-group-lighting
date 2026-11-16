@@ -47,7 +47,7 @@ table.rows td.value .error { color: var(--danger); font-size: 11px; margin-top: 
 .pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 12px; padding: 6px 0 0 2px; }
 .pick label { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: var(--radius); cursor: pointer; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .pick label:hover { background: var(--surface-hover); }
-.empty { color: var(--text-muted); padding: 8px 0; }
+.group-empty { color: var(--text-muted); padding: 8px 0; }
 pre.out { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; margin-top: 10px; }
 .btn[disabled] { opacity: 0.5; cursor: default; }
 table.rows td.tight { width: 1%; white-space: nowrap; }
@@ -209,7 +209,7 @@ function renderGroup() {
   byId("g-count").textContent = group.total + " in this group";
   var lights = group.lights || [];
   if (!lights.length) {
-    byId("g-lights").innerHTML = '<div class="empty">No lights yet. Pick them on the Lights tab.</div>';
+    byId("g-lights").innerHTML = '<div class="group-empty">No lights yet. Pick them on the Lights tab.</div>';
     return;
   }
   byId("g-lights").innerHTML =
@@ -220,7 +220,7 @@ function renderGroup() {
         if (l.level === undefined || l.level === null) {
           state = "not reported";
           cls = "none";
-        } else if (l.level > 0 === group.level > 0 && (!l.dimmable || l.level === 0 || Math.abs(l.level - group.level) <= 1)) {
+        } else if (l.inSync === true || (l.inSync === undefined && l.level > 0 === group.level > 0 && (!l.dimmable || l.level === 0 || Math.abs(l.level - group.level) <= 1))) {
           state = "in step";
           cls = "good";
         } else {
@@ -266,7 +266,7 @@ function renderPicker() {
   byId("p-count").textContent = checkedIds().length + " selected";
   byId("p-save").disabled = byId("p-discard").disabled = !picked;
   if (!rooms.length) {
-    byId("p-list").innerHTML = '<div class="empty">' + (filter ? "No light matches." : "The project has no other lights.") + "</div>";
+    byId("p-list").innerHTML = '<div class="group-empty">' + (filter ? "No light matches." : "The project has no other lights.") + "</div>";
   } else {
     byId("p-list").innerHTML = rooms
       .map(function (room, i) {
@@ -358,7 +358,7 @@ function renderScenes() {
   byId("c-read").textContent = readingScenes ? "Reading..." : group.cycle.known + " read" + (read ? ", " + read : "");
   if (!scenes.length) {
     byId("c-list").innerHTML =
-      '<div class="empty">' +
+      '<div class="group-empty">' +
       (group.cycle.known ? "No scene uses this group's lights. Add the group or one of its lights to a scene in Composer." : "No scenes have been read from the controller yet.") +
       "</div>";
     return;
@@ -432,18 +432,18 @@ function readScenes() {
   readingScenes = true;
   renderScenes();
   var agentId = null;
-  Kit.api("GET", "/api/v1/items?query=" + encodeURIComponent('{"type":9}'))
+  Kit.request("GET", "/api/v1/items?query=" + encodeURIComponent('{"type":9}'))
     .then(function (agents) {
       (Array.isArray(agents) ? agents : []).forEach(function (a) {
         if (a.filename === "control4_agent_adv_lighting.c4i") agentId = a.id;
       });
-      return Kit.api("GET", "/api/v1/agents/advanced_lighting");
+      return Kit.request("GET", "/api/v1/agents/advanced_lighting");
     })
     .then(function (list) {
       if (!Array.isArray(list)) return null;
       return Promise.all(
         list.map(function (scene) {
-          return Kit.api("GET", "/api/v1/agents/advanced_lighting/" + scene.scene_id).then(function (detail) {
+          return Kit.request("GET", "/api/v1/agents/advanced_lighting/" + scene.scene_id).then(function (detail) {
             // A scene that could not be read would drop out of the cycle: the scenes kept are left as they are.
             if (!detail) throw new Error("Scene " + scene.scene_id + " could not be read");
             var members = detail && detail.all_members ? detail.all_members.AdvSceneMember : [];
