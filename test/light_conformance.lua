@@ -410,12 +410,12 @@ function C.run(T, rig)
       finish(h)
     end)
 
-    T.section(name .. ": an in-progress fade uses the numeric target for built-in brightness presets")
+    T.section(name .. ": a brightness fade shows the numeric target and names the preset when settled")
     for _, fade in ipairs({
       { name = "Default On", preset = 1, target = 55 },
       { name = "Previous On", preset = 10, target = 37, start = 37 },
       { name = "Off", preset = 2, target = 0 },
-      { name = "Custom", preset = 3, target = 42, carriesPreset = true },
+      { name = "Custom", preset = 3, target = 42 },
       { name = "Direct ramp", target = 55 },
     }) do
       C.case(T, name, function()
@@ -437,7 +437,21 @@ function C.run(T, rig)
         else
           p:send("RAMP_TO_LEVEL", { LEVEL = fade.target, TIME = 750 })
         end
-        h.clock.run(100)
+        local targets = {}
+        for _ = 1, 7 do
+          h.clock.run(100)
+          targets[#targets + 1] = p:target() or -1
+        end
+        local target = fade.target
+        T.eq(name .. ": " .. fade.name .. " target throughout the fade", targets, {
+          target,
+          target,
+          target,
+          target,
+          target,
+          target,
+          target,
+        })
         local changing = p:last("LIGHT_BRIGHTNESS_CHANGING") or {}
         T.eq(name .. ": " .. fade.name .. " in-progress feedback", {
           level = changing.LIGHT_BRIGHTNESS_TARGET,
@@ -446,7 +460,6 @@ function C.run(T, rig)
         }, {
           level = fade.target,
           rate = 750,
-          preset = fade.carriesPreset and fade.preset or nil,
         })
         h.clock.run(ms)
         local changed = p:last("LIGHT_BRIGHTNESS_CHANGED") or {}

@@ -421,6 +421,15 @@ Template for a new release entry (copy below the heading, fill in, uncomment):
 - Removed
 -->
 
+## v2026111803-beta.1 - 2026-11-18
+
+### Fixed
+
+- Report the numeric brightness target throughout every fade, including fades to
+  custom presets. Report the preset ID when the fade settles.
+- Make the simulator's target helper read Director's displayed brightness target
+  so conformance tests catch stale targets during a fade.
+
 ## v2026111802-beta.1 - 2026-11-18
 
 ### Fixed
