@@ -421,6 +421,29 @@ Template for a new release entry (copy below the heading, fill in, uncomment):
 - Removed
 -->
 
+## v2026111801-beta.1 - 2026-11-18
+
+### Added
+
+- Show native member outages in Driver Status and the Settings tab.
+
+### Fixed
+
+- Keep the last brightness and keypad LED state when all native members go
+  offline. During a partial outage, reconcile commands with reachable members.
+- Preserve the last confirmed sync state and pause automatic scene matching
+  during a known outage.
+- Prevent failed or incomplete member reads from replacing the group’s
+  brightness with stale feedback.
+- Send configured keypad colors when the proxy first makes them available.
+- Keep valid brightness feedback when a native member sends an out-of-range
+  color temperature.
+
+### Changed
+
+- Update the shared Light V2 template to v0.9.113, use Composer’s supported fade
+  limit of 999,999 ms, and check preprocessed Lua globals per driver package.
+
 ## v2026111504-beta.1 - 2026-11-16
 
 ### Added
