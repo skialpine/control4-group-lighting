@@ -190,9 +190,18 @@ function renderGroup() {
   if (!group) return;
   byId("g-name").textContent = group.name || "Light Group";
   var pill = byId("g-pill");
-  var online = group.total > 0;
-  pill.className = "kit-pill " + (online ? (group.inSync ? "online" : "pending") : "offline");
-  pill.textContent = online ? (group.inSync ? "In sync" : "Out of sync") : "No lights selected";
+  var state = group.inSync ? "In sync" : "Out of sync";
+  var style = group.inSync ? "online" : "pending";
+  if (!group.total || group.offline === group.total) {
+    state = group.total ? "Offline" : "No lights selected";
+    style = "offline";
+  } else if (group.offline > 0) {
+    state = "Some lights offline";
+  } else if (group.known < group.total) {
+    state = "Waiting for feedback";
+  }
+  pill.className = "kit-pill " + style;
+  pill.textContent = state;
   var facts = [
     ["Status", esc(group.status || "")],
     ["Lights on", esc(group.on) + " of " + esc(group.total)],
@@ -217,7 +226,10 @@ function renderGroup() {
     lights
       .map(function (l) {
         var state, cls;
-        if (l.level === undefined || l.level === null) {
+        if (l.online === false) {
+          state = "offline";
+          cls = "warn";
+        } else if (l.level === undefined || l.level === null) {
           state = "not reported";
           cls = "none";
         } else if (l.inSync === true || (l.inSync === undefined && l.level > 0 === group.level > 0 && (!l.dimmable || l.level === 0 || Math.abs(l.level - group.level) <= 1))) {
@@ -628,7 +640,7 @@ Kit.demoMode(function (command, params) {
     });
     Kit.deliver("GROUP_DATA", {
       payload: JSON.stringify({
-        name: "Office Lights", status: "Online", total: 3, on: 3, inSync: false, level: 74, kelvin: 3200,
+        name: "Office Lights", status: "Online", total: 3, known: 3, offline: 0, on: 3, inSync: false, level: 74, kelvin: 3200,
         dims: true, color: false, cct: true, minKelvin: 2203, maxKelvin: 6536, trackedId: null,
         lights: [
           { id: 1, name: "Left", dimmable: true, cct: true, minKelvin: 2203, maxKelvin: 6536, level: 74, kelvin: 3200 },

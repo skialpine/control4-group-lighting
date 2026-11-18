@@ -158,7 +158,10 @@ Which releases an update takes. Prerelease includes builds still in testing.
 
 #### Driver Status (read-only)
 
-`Online` once the group has lights, or `No lights selected`.
+`No lights selected` until lights are added, then `Waiting for light feedback`
+until a light reports. The group shows `Online` when it has feedback, an offline
+count when some members report a loss, or `Offline` when all members report a
+loss.
 
 #### Driver Version (read-only)
 

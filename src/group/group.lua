@@ -14,6 +14,7 @@ require("drivers-common-public.global.timer")
 
 local log = require("lib.logging")
 local Aggregate = require("group.aggregate")
+local Caps = require("lib.light.caps")
 local Range = require("lib.light.range")
 
 local light -- attached by the driver after Light.new
@@ -70,6 +71,7 @@ local settings = {
 --- @field colorBusyUntil number|nil When the last dispatched color transition and its feedback have settled.
 --- @field groupJoined boolean|nil A protocol join was sent for this connection.
 --- @field groupProtocol boolean|nil Its join was answered with LIGHT_GROUP_STATE.
+--- @field online boolean|nil Connection state reported by a native member.
 
 --- @type Member[]
 local members = {}
@@ -85,12 +87,18 @@ local levelBusyUntil, colorBusyUntil = 0, 0
 local seeded = false
 --- The last wire send still needs the members' settled answer, even if they reach exactly its target.
 local pendingReport = false
+--- A refresh from the shared engine is answered once the member fades settle.
+local refreshAsked = false
+local availabilityChanged = false
+local feedbackChanged = false
 --- The lights changed by something other than the group since they were last read, for the others to follow one
 --- when kept in sync.
 local changedLights = {}
 --- The light the others were last sent after: its further reports still count while they settle.
 local followed = nil
 local queue = {}
+--- Whether a command went out less than the command delay ago.
+local spacing = false
 local controlLog = {}
 local onChange = function() end
 local commandSequence = 0
@@ -204,6 +212,7 @@ local function kelvinRange()
 end
 
 --- The group's capabilities and transport behavior, as the shared library's device.
+--- @return LightDevice
 function Group.device()
   local dims, color, cct = abilities()
   local lo, hi = kelvinRange()
@@ -213,7 +222,7 @@ function Group.device()
     cct = cct and { minK = lo, maxK = hi } or nil,
     colorWhileOff = "hold",
     levelSteps = 100,
-    fade = { kind = "device", curve = "linear", preOn = false, retimes = false, maxMs = 86400000 },
+    fade = { kind = "device", curve = "linear", preOn = false, retimes = false, maxMs = Caps.RATE_LIMIT },
     feedback = { shows = "target", waitMs = settings.feedbackDelay, refresh = true },
   }
 end
@@ -265,15 +274,20 @@ local function readState(member, value)
   recordFeedback(member, "level", { ON = on, LEVEL = member.level or "unknown" })
 end
 
-local function readColor(member, value)
+local function validKelvin(value)
+  local kelvin = tofinite(value)
+  return kelvin and kelvin > 0 and kelvin < 100000 and kelvin or nil
+end
+
+local function readColor(member, value, reportedKelvin)
   local x, y, mode = string.match(tostring(value or ""), "^([^,]+),([^,]+),([^,]+)$")
   x, y, mode = tonumber(x), tonumber(y), tonumber(mode)
-  if not x or not y then
-    return
+  if not x or not y or not (x >= 0 and x <= 1 and y >= 0 and y <= 1) then
+    return false
   end
   local color = { mode = mode == COLOR_MODE_CCT and COLOR_MODE_CCT or COLOR_MODE_FULL, x = x, y = y }
   if color.mode == COLOR_MODE_CCT then
-    color.kelvin = tonumber(C4:ColorXYtoCCT(x, y))
+    color.kelvin = validKelvin(reportedKelvin) or validKelvin(C4:ColorXYtoCCT(x, y))
   end
   member.deviceColor = { mode = color.mode, x = x, y = y, kelvin = color.kelvin }
   if color.mode == COLOR_MODE_CCT then
@@ -292,12 +306,13 @@ local function readColor(member, value)
   end
   member.color = color
   recordFeedback(member, "color", { MODE = color.mode, X = x, Y = y, KELVIN = color.kelvin })
+  return true
 end
 
 local evaluate
 
 local function scheduleFeedback()
-  local wait = math.max(FEEDBACK_DEBOUNCE_MS, busyUntil - C4:GetTime())
+  local wait = availabilityChanged and FEEDBACK_DEBOUNCE_MS or math.max(FEEDBACK_DEBOUNCE_MS, busyUntil - C4:GetTime())
   SetTimer("GroupFeedback", wait, function()
     evaluate()
   end)
@@ -316,6 +331,7 @@ local function reported(member, before)
     return
   end
   local now = showing(member)
+  feedbackChanged = feedbackChanged or now ~= before
   -- A report while the lights settle is the group's own command taking effect, but for the light the others are
   -- following: it may still be moving.
   if member.watched and now ~= before and (C4:GetTime() >= busyUntil or member == followed) then
@@ -372,35 +388,49 @@ local function unwatch(member)
   end
 end
 
-local function readAll(member)
-  readCapabilities(member)
-  if member.groupProtocol then
-    return
-  end
-  pcall(function()
-    readLevel(member, C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_LEVEL))
-    if member.level == nil then
-      readState(member, C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_STATE))
+--- @return boolean levelRead, boolean colorRead
+local function readMemberState(member)
+  local ok, level = pcall(function()
+    local level = tofinite(C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_LEVEL))
+    if level == nil then
+      local state = C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_STATE)
+      if state ~= nil and state ~= "" then
+        if not toboolean(state) then
+          level = 0
+        elseif member.dimmable == false then
+          level = 100
+        end
+      end
     end
-    readColor(member, C4:GetDeviceVariable(member.id, VARIABLE.LIGHT_COLOR))
+    return level
   end)
+  if not ok then
+    log:warn("Could not read the level of %s [%d]: %s", member.name, member.id, tostring(level))
+    return false, false
+  end
+  readLevel(member, level)
+  local expectsColor = member.supportsColor or member.supportsCCT
+  local colorOK, color = pcall(C4.GetDeviceVariable, C4, member.id, VARIABLE.LIGHT_COLOR)
+  if not colorOK and expectsColor then
+    log:warn("Could not read the color of %s [%d]: %s", member.name, member.id, tostring(color))
+  end
+  local colorRead = colorOK and readColor(member, color)
+  return level ~= nil, colorRead or not expectsColor
 end
 
 ---------------------------------------------------------------------------
 -- Telling the light model
 ---------------------------------------------------------------------------
 
-local function pushState()
+--- @param kind LightReportKind
+--- @param colorConfirmed boolean
+local function pushState(kind, colorConfirmed)
   if not light or #members == 0 then
     return
   end
   light:declare(Group.device())
-  local report = { kind = "push", color = vstate.color }
   if seeded then
-    report.on, report.level = vstate.on, vstate.level
-  end
-  if seeded then
-    light:report(report)
+    light:report({ kind = kind, on = vstate.on, level = vstate.level, color = colorConfirmed and vstate.color or nil })
   end
 end
 
@@ -409,11 +439,20 @@ local function setVColor(color)
     { mode = color.mode == COLOR_MODE_CCT and "cct" or "xy", x = color.x, y = color.y, kelvin = color.kelvin }
 end
 
---- @return { total: integer, on: integer, inSync: boolean }
+--- @class GroupStatus
+--- @field total integer
+--- @field known integer Lights with a level and no reported loss.
+--- @field on integer Lights last reported on.
+--- @field offline integer Lights that have explicitly reported a loss.
+--- @field inSync boolean
+
+--- @return GroupStatus
 function Group.status()
-  local on, known = 0, 0
+  local on, known, offline = 0, 0, 0
   for _, member in ipairs(members) do
-    if member.level ~= nil then
+    if member.online == false then
+      offline = offline + 1
+    elseif member.level ~= nil then
       known = known + 1
     end
     if (member.level or 0) > 0 then
@@ -424,8 +463,20 @@ function Group.status()
     total = #members,
     known = known,
     on = on,
+    offline = offline,
     inSync = known == #members and Aggregate.inSync(members, vLevel()),
   }
+end
+
+local function loseConnection()
+  refreshAsked, pendingReport, availabilityChanged, feedbackChanged = false, false, false, false
+  busyUntil, levelBusyUntil, colorBusyUntil = 0, 0, 0
+  queue, spacing, changedLights, followed = {}, false, {}, nil
+  CancelTimer("GroupQueue")
+  CancelTimer("GroupFeedback")
+  if light and light.online then
+    light:lost()
+  end
 end
 
 --- Reads the lights' own levels and colors into the group's state, once they have settled.
@@ -434,19 +485,29 @@ evaluate = function(force)
   if #members == 0 then
     return
   end
-  local available = false
+  local reachable = {}
   for _, member in ipairs(members) do
-    available = available or member.online ~= false
-  end
-  if not available then
-    if light and light.online then
-      light:lost(false)
+    if member.online ~= false then
+      reachable[#reachable + 1] = member
     end
+  end
+  if #reachable == 0 then
+    loseConnection()
     onChange(Group.status())
     return
   end
   if not force and C4:GetTime() < busyUntil then
+    if availabilityChanged then
+      onChange(Group.status())
+    end
+    availabilityChanged = false
     scheduleFeedback()
+    return
+  end
+  local reconcile = feedbackChanged or pendingReport or refreshAsked or force or (light and not light.online)
+  availabilityChanged, feedbackChanged = false, false
+  if not reconcile then
+    onChange(Group.status())
     return
   end
   -- One light changed by itself takes the others with it. Several changed together is a scene, or programming,
@@ -461,8 +522,26 @@ evaluate = function(force)
     onChange(Group.status())
     return
   end
+  local kind, colorConfirmed = "push", true
+  if (refreshAsked or pendingReport) and C4:GetTime() >= busyUntil then
+    local levelConfirmed = true
+    for _, member in ipairs(reachable) do
+      if not member.groupProtocol then
+        local levelRead, colorRead = readMemberState(member)
+        levelConfirmed = levelConfirmed and levelRead
+        colorConfirmed = colorConfirmed and colorRead
+      end
+    end
+    kind = refreshAsked and "final" or "push"
+    refreshAsked = false
+    if not levelConfirmed then
+      pendingReport = false
+      onChange(Group.status())
+      return
+    end
+  end
   local dims, color, cct = abilities()
-  local changed = force or pendingReport or (light and not light.online)
+  local changed = force or kind == "final" or pendingReport or (light and not light.online)
   if vstate.color and ((vstate.color.mode == "xy" and not color) or (vstate.color.mode == "cct" and not cct)) then
     vstate.color = nil
   end
@@ -473,7 +552,7 @@ evaluate = function(force)
   if first and tracking == Aggregate.Brightness.IGNORE then
     tracking = Aggregate.Brightness.AVERAGE
   end
-  local level = Aggregate.level(members, tracking, settings.trackedId, commanded)
+  local level = Aggregate.level(reachable, tracking, settings.trackedId, commanded)
   if level ~= nil then
     seeded = true
   end
@@ -490,12 +569,12 @@ evaluate = function(force)
     end
     changed = true
   end
-  if color or cct then
+  if colorConfirmed and (color or cct) then
     local colorTracking = settings.colorTracking
     if first and colorTracking == Aggregate.Color.IGNORE then
       colorTracking = Aggregate.Color.AVERAGE
     end
-    local shown = Aggregate.color(members, colorTracking, settings.trackedId)
+    local shown = Aggregate.color(reachable, colorTracking, settings.trackedId)
     if shown and shown.mode == COLOR_MODE_FULL and not color then
       shown = nil
     elseif shown and shown.mode == COLOR_MODE_CCT and not cct then
@@ -510,7 +589,9 @@ evaluate = function(force)
   if changed then
     pendingReport = false
     -- The status below is still shown if the light model raises.
-    local ok, err = xpcall(pushState, debug.traceback)
+    local ok, err = xpcall(function()
+      pushState(kind, colorConfirmed)
+    end, debug.traceback)
     if not ok then
       log:error("The group's state could not be told to the proxy: %s", err)
     end
@@ -548,9 +629,6 @@ local function dispatch(entry)
   record(member, command, {}, "sent", entry.sequence)
   return true
 end
-
---- Whether a command went out less than the command delay ago.
-local spacing = false
 
 local function drain()
   local entry = table.remove(queue, 1)
@@ -773,7 +851,20 @@ function Group.attach(instance)
         -- Only a reply to this connection's join confirms the custom protocol. A generic load-group capability
         -- alone does not: ordinary Light V2 drivers keep the standard transport.
         member.groupProtocol = true
+        local wasOnline = member.online
         member.online = toboolean(Select(params, "ONLINE"))
+        availabilityChanged = availabilityChanged or (wasOnline ~= member.online)
+        if not member.online then
+          -- A lost member's report can have an empty level and color. Keep its last real state.
+          changedLights[member] = nil
+          if followed == member then
+            followed = nil
+          end
+          if wasOnline ~= false then
+            scheduleFeedback()
+          end
+          return
+        end
         local before = showing(member)
         if toboolean(Select(params, "ON")) then
           readLevel(member, Select(params, "LEVEL"))
@@ -782,15 +873,25 @@ function Group.attach(instance)
         end
         local x, y = tonumber(Select(params, "X")), tonumber(Select(params, "Y"))
         if x and y then
-          readColor(member, x .. "," .. y .. "," .. (Select(params, "MODE") == "cct" and "1" or "0"))
+          readColor(
+            member,
+            x .. "," .. y .. "," .. (Select(params, "MODE") == "cct" and "1" or "0"),
+            Select(params, "KELVIN")
+          )
         end
-        reported(member, before)
+        if wasOnline == false then
+          feedbackChanged = true
+          scheduleFeedback()
+        else
+          reported(member, before)
+        end
         return
       end
     end
   end
 end
 
+--- @return LightProfile
 function Group.profile()
   return {
     api = 1,
@@ -799,7 +900,7 @@ function Group.profile()
     color = true,
     cct = true,
     fades = true,
-    maxMs = 86400000,
+    maxMs = Caps.RATE_LIMIT,
     defaultOn = true,
     scenes = true,
     onModes = true,
@@ -807,6 +908,7 @@ function Group.profile()
   }
 end
 
+--- @return LightAdapter
 function Group.adapter()
   return {
     send = function(_, cmd)
@@ -816,11 +918,8 @@ function Group.adapter()
       if #members == 0 then
         return
       end
-      if C4:GetTime() < busyUntil then
-        scheduleFeedback()
-      else
-        evaluate(true)
-      end
+      refreshAsked = true
+      evaluate()
     end,
     show = function(_, shown)
       displayed = shown
@@ -836,9 +935,7 @@ end
 --- Tells the light model what the group is and shows now, after its lights or settings changed.
 function Group.refresh()
   if #members == 0 then
-    if light and light.online then
-      light:lost(false)
-    end
+    loseConnection()
     onChange(Group.status())
     return
   end
@@ -862,7 +959,10 @@ function Group.setMembers(devices)
       member = { id = device.id, name = device.name }
       watch(member)
     end
-    readAll(member)
+    readCapabilities(member)
+    if not member.groupProtocol then
+      readMemberState(member)
+    end
     now[#now + 1] = member
   end
   for _, member in pairs(kept) do
@@ -913,15 +1013,13 @@ end
 --- End this instance's transport work before Director unloads it. No device or proxy commands go out.
 function Group.stop()
   active = false
+  refreshAsked, availabilityChanged, feedbackChanged = false, false, false
   for _, name in ipairs({ "GroupQueue", "GroupFeedback", "GroupProbe" }) do
     CancelTimer(name)
   end
   queue, spacing, changedLights, followed = {}, false, {}, nil
   for _, member in ipairs(members) do
     unwatch(member)
-  end
-  if light then
-    light:stop()
   end
 end
 
@@ -999,7 +1097,7 @@ function Group.sync()
   })
 end
 
---- @param callback fun(status: { total: integer, on: integer, inSync: boolean }) Called after the lights are read.
+--- @param callback fun(status: GroupStatus) Called after the lights are read.
 function Group.onChange(callback)
   onChange = callback
 end
@@ -1106,6 +1204,7 @@ function Group.snapshot()
       minKelvin = member.minKelvin,
       maxKelvin = member.maxKelvin,
       level = member.level,
+      online = member.online,
       inSync = Aggregate.memberInSync(member, vLevel(), shown),
       kelvin = member.color and member.color.kelvin and math.floor(member.color.kelvin + 0.5) or nil,
       x = member.color and member.color.x or nil,
@@ -1115,6 +1214,8 @@ function Group.snapshot()
   local status = Group.status()
   return {
     total = status.total,
+    known = status.known,
+    offline = status.offline,
     on = status.on,
     inSync = status.inSync,
     level = seeded and vLevel() or nil,

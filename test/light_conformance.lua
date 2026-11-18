@@ -187,10 +187,12 @@ end
 --- @param rig LightRig
 --- @param state LightValues|nil Where the device starts.
 --- @param variables table<integer, string>|nil What the proxy's variables hold, as after a restart.
+--- @param setup string|nil GET_SETUP's answer in place of the rig's.
+--- @param newLight string|nil GET_SETUP's answer before color capabilities are told.
 --- @return LightRigHarness
-local function fresh(rig, state, variables)
+local function fresh(rig, state, variables, setup, newLight)
   local clock = F.virtualClock()
-  local proxy = P.install(clock, { setup = rig.setup, variables = variables })
+  local proxy = P.install(clock, { setup = setup or rig.setup, variables = variables, newLight = newLight })
   local errors = {}
   local logError = log.error
   log.error = function(self, fmt, ...)
@@ -536,7 +538,8 @@ function C.run(T, rig)
 
     T.section(name .. ": a keypad asking a link for its button's colors is answered on that link")
     C.case(T, name, function()
-      local h = fresh(rig)
+      -- A proxy's setup lists the project's button colors, a new light's too.
+      local h = fresh(rig, nil, nil, rig.setup or P.setupFile("setup-732-new.xml"))
       local p = h.proxy
       for _, link in ipairs({ links.top, links.toggle, links.bottom }) do
         p:mark()
@@ -553,6 +556,25 @@ function C.run(T, rig)
       end
       finish(h)
     end)
+
+    if hasColor then
+      T.section(name .. ": a keypad gets colors learned after capabilities are told")
+      C.case(T, name, function()
+        local h = fresh(rig, nil, nil, P.setupFile("setup-732-new.xml"), "<setup/>")
+        local expectedOn, expectedOff = h.light.settings:buttonColors(0)
+        local colors = h.proxy:toldLink(links.top, "BUTTON_COLORS")
+        T.eq(name .. ": the link was notified when setup learned the colors", #colors, 1)
+        T.check(
+          name .. ": the link has the configured colors",
+          expectedOn ~= nil
+            and expectedOff ~= nil
+            and colors[1] ~= nil
+            and colors[1].ON_COLOR == expectedOn
+            and colors[1].OFF_COLOR == expectedOff
+        )
+        finish(h)
+      end)
+    end
 
     if ramps then
       T.section(name .. ": a link's hold ramps the light while held, and the release holds it there")
@@ -821,19 +843,20 @@ function C.run(T, rig)
     end)
   end
 
-  T.section(name .. ": a lost connection reads offline and off; back, it shows the device")
+  T.section(name .. ": a lost connection reads offline and keeps its level; back, it shows the device")
   C.case(T, name, function()
     local h = fresh(rig)
     local p = h.proxy
     p:send("ON")
     h.clock.run(ms)
+    local level = p.level
     p:mark()
     h.device.drop()
     h.clock.run(ms)
     T.eq(name .. ": ONLINE_CHANGED false", on(p.online), false)
-    T.eq(name .. ": and off", p.level, 0)
+    T.eq(name .. ": and the level is kept", p.level, level)
     if links then
-      T.eq(name .. ": the On link's LED is off", on(p.leds[links.top]), false)
+      T.eq(name .. ": the On link's LED stays lit", on(p.leds[links.top]), true)
     end
     p:mark()
     h.device.back()

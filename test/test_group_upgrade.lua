@@ -50,6 +50,37 @@ local ok, err = xpcall(function()
   T.eq("the updated generic group still works", p.members[802].level, 90)
   T.eq("the native group was not disturbed", p.members[804].level, 50)
   T.eq("the mixed group was not disturbed", p.members[806].level, 75)
+  T.section("A native loss in a mixed group keeps the standard member available")
+  local mixed = c.env.require("group.group")
+  local cycle = c.env.require("group.cycle")
+  cycle.setScenes({
+    {
+      id = 1,
+      name = "Mixed Scene",
+      members = { 805, 806 },
+      targets = { ["805"] = { level = 75 }, ["806"] = { level = 0 } },
+    },
+  }, 1)
+  mixed.configure({ keepSync = true })
+  local beforeLoss = #p.commands
+  p:setOnline(805, false)
+  p.clock.run(2500)
+  T.eq("the mixed group stays online", c.light.online, true)
+  T.eq("only the native member is shown offline", c.env.Properties["Driver Status"], "1 of 2 lights offline")
+  T.eq("the group's level does not change on loss", c.proxy.level, 75)
+  T.eq("losing a member sends no movement to the other one", #p.commands, beforeLoss)
+  T.eq("the standard member retains its level", p.members[806].level, 75)
+  T.eq("the programming variable keeps its confirmed value", c.env.Variables.LIGHTS_IN_SYNC, "1")
+  c.proxy:send("OFF")
+  p.clock.run(5000)
+  T.eq("the offline member did not receive the command", p.members[805].level, 75)
+  T.eq("the standard member turned off", p.members[806].level, 0)
+  T.eq("the displayed level follows the reachable member", c.proxy.level, 0)
+  T.eq("the cached offline reading does not establish a scene match", cycle.current().id, nil)
+  p:setOnline(805, true)
+  p.clock.run(3500)
+  T.eq("scene tracking resumes with complete feedback", cycle.current().id, 1)
+  T.eq("the programming variable reports the now-confirmed mismatch", c.env.Variables.LIGHTS_IN_SYNC, "0")
   T.eq("no callback raised", p.clock.errors, {})
   a.env.SetTimer("FixtureErrorProbe", 1, function()
     error("fixture timer sentinel")

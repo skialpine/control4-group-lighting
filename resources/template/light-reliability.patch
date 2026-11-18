@@ -5,7 +5,7 @@ index f185be6..e68cfe3 100644
 @@ -186,6 +186,12 @@ function OnDriverLateInit()
    --#endif
  end
- 
+
 +function OnDriverDestroyed()
 +  CancelTimer("ExampleLight.Pushed")
 +  CancelTimer("ExampleLight.Answer")
@@ -22,7 +22,7 @@ index 9f91535..7fbcfb4 100644
 @@ -80,4 +80,12 @@ function rig.load(h, state)
    }
  end
- 
+
 +function rig.reload(h)
 +  local state = h.device.state()
 +  if OnDriverDestroyed then
@@ -33,7 +33,7 @@ index 9f91535..7fbcfb4 100644
 +
  return { version = C.RIG_VERSION, rigs = { example_light = { rig } } }
 diff --git a/template/src/lib/light.lua b/template/src/lib/light.lua
-index 1038233..d7f4d92 100644
+index fd734ca..b4fb76d 100644
 --- a/template/src/lib/light.lua
 +++ b/template/src/lib/light.lua
 @@ -222,6 +222,9 @@ end
@@ -46,10 +46,10 @@ index 1038233..d7f4d92 100644
    local why = unfit(report)
    if why then
      log:error("Light:report: the report is dropped: %s", why)
-@@ -256,6 +259,35 @@ function Light:lost(suspended)
+@@ -255,6 +258,35 @@ function Light:lost()
    self:_tellGroups()
  end
- 
+
 +--- A detached, read-only diagnostic snapshot. Reading it sends no commands and changes no deadlines.
 +function Light:diagnostics()
 +  local pending = {}
@@ -83,10 +83,21 @@ index 1038233..d7f4d92 100644
  function Light:reset()
    self:_endRun()
 diff --git a/template/src/lib/light/proxy.lua b/template/src/lib/light/proxy.lua
-index f53d7a6..c9b23a0 100644
+index 99217ee..6d9e5e4 100644
 --- a/template/src/lib/light/proxy.lua
 +++ b/template/src/lib/light/proxy.lua
-@@ -739,13 +739,32 @@ function LightProxy:shown()
+@@ -617,6 +617,10 @@ function LightProxy:_syncSettings()
+     if not commanded[self.settings.P_BUTTON_COLORS] then
+       for _, button in ipairs(Buttons.ALL) do
+         local on, off = self.settings:buttonColors(button)
++        local told = self.buttons[button]
++        if on ~= told.on or off ~= told.off then
++          self:_tellLinkColors(button)
++        end
+         self.buttons[button] = { on = on, off = off }
+       end
+     end
+@@ -728,13 +732,32 @@ function LightProxy:shown()
      kelvin = Color.kelvin(color.x, color.y)
      kelvin = kelvin and math.floor(kelvin + 0.5) or nil
    end
@@ -121,14 +132,26 @@ index f53d7a6..c9b23a0 100644
 +  end
 +  return copy
  end
- 
+
  --- A read the proxy, or a keypad over a Button Link, asks.
+@@ -756,10 +779,7 @@ function LightProxy:answer(strCommand, _tParams, _view, idBinding)
+     local asking = self:_button(idBinding)
+     if asking ~= nil then
+       -- A keypad button bound to a Button Link asks over that link, and is answered on it.
+-      local on, off = self.settings:buttonColors(asking)
+-      if on or off then
+-        SendToProxy(idBinding, "BUTTON_COLORS", { ON_COLOR = on, OFF_COLOR = off }, "NOTIFY")
+-      end
++      self:_tellLinkColors(asking)
+       SendToProxy(idBinding, "MATCH_LED_STATE", { STATE = self:_ledsHeld() }, "NOTIFY", true)
+       return
+     end
 diff --git a/template/src/lib/light/types.lua b/template/src/lib/light/types.lua
-index 0518234..f72db3d 100644
+index 276f9aa..925992e 100644
 --- a/template/src/lib/light/types.lua
 +++ b/template/src/lib/light/types.lua
-@@ -161,6 +161,9 @@ Types.API = 1
- 
+@@ -163,6 +163,9 @@ Types.API = 1
+
  --- What the proxy shows that a device page may mirror.
  --- @class LightShown
 +--- @field on boolean|nil The displayed target's power; nil until a level is known.
@@ -137,9 +160,9 @@ index 0518234..f72db3d 100644
  --- @field kelvin integer|nil The Kelvin the proxy shows; nil in full color or without CCT.
  --- @field minOn integer Min On Level, 1-100.
  --- @field maxOn integer Max On Level, 1-100.
-@@ -226,6 +229,14 @@ Types.API = 1
- --   From OnDriverLateInit. Reads the proxy (GET_SETUP, 6661, 1001/1110, 1200/1210), tells offline until the
- --   device's first report, and asks refresh() once. Reports given before it are taken then, in order.
+@@ -229,6 +232,14 @@ Types.API = 1
+ --   device's first report, and asks refresh() once. Reports given before it are taken then, in order. The
+ --   capabilities are told at each connection's first report whatever 6661 lists.
  --
 +-- light:diagnostics()
 +--   A detached local snapshot of the modeled state, ramp targets and time left, pending feedback deadlines,
@@ -167,7 +190,7 @@ index 0065080..189a0fb 100644
 @@ -83,17 +84,25 @@ var Kit = (function () {
    }
    // #endif
- 
+
 -  function api(method, path, body) {
 +  // An authenticated controller request for a custom tab. Errors reject so a failed read cannot silently
 +  // replace saved data with an empty result. Credentials stay in the header on this controller's origin.
@@ -198,7 +221,7 @@ index 0065080..189a0fb 100644
 +      return null;
 +    });
    }
- 
+
    // UTF-8, since btoa takes only Latin-1, broken by a newline every 76 characters: the broker's cost grows with the
 @@ -655,6 +664,7 @@ var Kit = (function () {
      str: str,
@@ -209,13 +232,53 @@ index 0065080..189a0fb 100644
      call: call,
      follow: follow,
 diff --git a/template/test/light_conformance.lua b/template/test/light_conformance.lua
-index 51a0fa6..8bbef0c 100644
+index 2230507..91dfd1d 100644
 --- a/template/test/light_conformance.lua
 +++ b/template/test/light_conformance.lua
-@@ -982,6 +982,31 @@ function C.run(T, rig)
+@@ -188,10 +188,11 @@ end
+ --- @param state LightValues|nil Where the device starts.
+ --- @param variables table<integer, string>|nil What the proxy's variables hold, as after a restart.
+ --- @param setup string|nil GET_SETUP's answer in place of the rig's.
++--- @param newLight string|nil GET_SETUP's answer before color capabilities are told.
+ --- @return LightRigHarness
+-local function fresh(rig, state, variables, setup)
++local function fresh(rig, state, variables, setup, newLight)
+   local clock = F.virtualClock()
+-  local proxy = P.install(clock, { setup = setup or rig.setup, variables = variables })
++  local proxy = P.install(clock, { setup = setup or rig.setup, variables = variables, newLight = newLight })
+   local errors = {}
+   local logError = log.error
+   log.error = function(self, fmt, ...)
+@@ -556,6 +557,25 @@ function C.run(T, rig)
+       finish(h)
+     end)
+
++    if hasColor then
++      T.section(name .. ": a keypad gets colors learned after capabilities are told")
++      C.case(T, name, function()
++        local h = fresh(rig, nil, nil, P.setupFile("setup-732-new.xml"), "<setup/>")
++        local expectedOn, expectedOff = h.light.settings:buttonColors(0)
++        local colors = h.proxy:toldLink(links.top, "BUTTON_COLORS")
++        T.eq(name .. ": the link was notified when setup learned the colors", #colors, 1)
++        T.check(
++          name .. ": the link has the configured colors",
++          expectedOn ~= nil
++            and expectedOff ~= nil
++            and colors[1] ~= nil
++            and colors[1].ON_COLOR == expectedOn
++            and colors[1].OFF_COLOR == expectedOff
++        )
++        finish(h)
++      end)
++    end
++
+     if ramps then
+       T.section(name .. ": a link's hold ramps the light while held, and the release holds it there")
+       C.case(T, name, function()
+@@ -985,6 +1005,31 @@ function C.run(T, rig)
      end)
    end
- 
+
 +  if rig.reload then
 +    T.section(name .. ": an in-place update preserves the proxy, device and saved light settings")
 +    C.case(T, name, function()
@@ -245,7 +308,7 @@ index 51a0fa6..8bbef0c 100644
      T.section(name .. ": a command the device rests apart from is told once, where the device rests")
      C.case(T, name, function()
 diff --git a/template/test/light_rig.lua b/template/test/light_rig.lua
-index 3c2b468..df824d5 100644
+index 086e5c5..6163ff5 100644
 --- a/template/test/light_rig.lua
 +++ b/template/test/light_rig.lua
 @@ -46,6 +46,9 @@ Rig.VERSION = 1
@@ -257,25 +320,219 @@ index 3c2b468..df824d5 100644
 +---   Return a replacement device facade if needed. Absent: no in-place update case is run.
  --- @field rest fun(h: LightRigHarness)|nil Sends the proxy command after which the adapter returns a
  ---   LightRest; nil when it never does.
- 
+
+diff --git a/template/tools/globals.py b/template/tools/globals.py
+index 8b3ee3e..9b2ae9f 100755
+--- a/template/tools/globals.py
++++ b/template/tools/globals.py
+@@ -10,7 +10,8 @@ compiles both (tools/globals.lua):
+ - a global a built file reads that its source never reads as a global was a local
+   the build lost, such as a `local function` inside `--#ifndef DRIVERCENTRAL`;
+ - a global a build reads that the source sets but the build never does was
+-  defined only in a branch the build left out.
++  defined only in a branch the build left out. Definitions are compared within
++  each driver and its literal require dependencies.
+
+ A built file that does not compile fails too. Run after `tools/preprocess.py`, as
+ `make check` does:
+@@ -19,13 +20,21 @@ A built file that does not compile fails too. Run after `tools/preprocess.py`, a
+
+ from __future__ import annotations
+
++import re
+ import subprocess
+ import sys
+ from collections import defaultdict
++from functools import lru_cache
+ from pathlib import Path
+
+ ROOT = Path(__file__).resolve().parent.parent
+ TREES = ("src", "drivers", "vendor")
++LUA_TOKEN = re.compile(
++    r"(?P<long>(?:--)?\[(?P<equals>=*)\[.*?\](?P=equals)\])"
++    r"|--[^\n]*|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\w+|\S",
++    re.DOTALL,
++)
++MODULE_NAME = re.compile(r"""(['"])([\w./-]+)\1""")
+
+
+ def lua_files(base: Path) -> list[Path]:
+@@ -78,27 +87,83 @@ def globals_of(files: list[Path]) -> tuple[dict, dict]:
+     return found, errors
+
+
++@lru_cache(maxsize=None)
++def required_modules(file: Path) -> tuple[str, ...]:
++    """Find literal module names in require calls, including pcall(require, ...)."""
++    tokens = [
++        match[0]
++        for match in LUA_TOKEN.finditer(file.read_text(encoding="utf-8"))
++        if not match[0].startswith("--")
++    ]
++    modules = []
++    for i, token in enumerate(tokens):
++        if token != "require" or (i and tokens[i - 1] in (".", ":")):
++            continue
++        argument = i + 1
++        if argument < len(tokens) and tokens[argument] in ("(", ","):
++            argument += 1
++        if argument < len(tokens) and (
++            literal := MODULE_NAME.fullmatch(tokens[argument])
++        ):
++            modules.append(literal[2])
++    return tuple(modules)
++
++
++def package_files(entry: Path, base: Path) -> set[Path]:
++    """Resolve literal dependencies in the same directory order as gen-squishy.lua."""
++    paths = (base / "src", base / "vendor", entry.parent)
++    included: set[Path] = set()
++    pending = [entry]
++    while pending:
++        file = pending.pop()
++        if file in included:
++            continue
++        included.add(file)
++        for name in required_modules(file):
++            module = name.replace(".", "/")
++            resolved = next(
++                (
++                    directory / relative
++                    for directory in paths
++                    for relative in (f"{module}.lua", f"{module}/init.lua")
++                    if (directory / relative).is_file()
++                ),
++                None,
++            )
++            if resolved is not None:
++                pending.append(resolved)
++    return included
++
++
+ def check(build_dirs: list[Path], root: Path = ROOT) -> list[str]:
+     """Each global a build reads that its branches took away, as an error message."""
+     problems = []
++    required_modules.cache_clear()
+     for build_dir in build_dirs:
+         built = lua_files(build_dir)
+         pairs = {b: source_of(b, build_dir, root) for b in built}
+-        sources = sorted({s for s in pairs.values() if s is not None})
+-        found, errors = globals_of(built + sources)
+-        set_in_source = set().union(*(found[s]["GSET"] for s in sources))
+-        set_in_build = set().union(*(found[b]["GSET"] for b in built))
+-        only_in_branches = set_in_source - set_in_build
++        packages = [
++            (entry, package_files(pairs[entry], root), package_files(entry, build_dir))
++            for entry in sorted((build_dir / "drivers").glob("*/driver.lua"))
++            if pairs.get(entry) is not None
++        ]
++        sources = {s for s in pairs.values() if s is not None}
++        for _, source_package, _ in packages:
++            sources.update(source_package)
++        found, errors = globals_of(built + sorted(sources))
+         for b, s in pairs.items():
+-            if s is None:
+-                continue
+-            where = s.relative_to(root)
+             if b in errors:
++                where = (
++                    s.relative_to(root) if s is not None else b.relative_to(build_dir)
++                )
+                 problems.append(
+                     f'File "{where}": the {build_dir.name} build does not compile:'
+                     f" {errors[b]}"
+                 )
+                 continue
++            if s is None:
++                continue
++            where = s.relative_to(root)
+             reads = found[b]["GGET"]
+             if s in errors:
+                 lost = set()
+@@ -110,12 +175,24 @@ def check(build_dirs: list[Path], root: Path = ROOT) -> list[str]:
+                     " global, but the source declares it local. An #ifdef/#ifndef"
+                     " branch this build leaves out holds the declaration."
+                 )
+-            for name in sorted((reads & only_in_branches) - lost):
+-                problems.append(
+-                    f'File "{where}": the {build_dir.name} build reads the global'
+-                    f" `{name}`, which only an #ifdef/#ifndef branch this build leaves"
+-                    " out sets."
+-                )
++        for entry, source_package, built_package in packages:
++            source_sets = set().union(*(found[file]["GSET"] for file in source_package))
++            build_sets = set().union(*(found[file]["GSET"] for file in built_package))
++            only_in_branches = source_sets - build_sets
++            for file in sorted(built_package):
++                original = pairs.get(file)
++                if original is None or file in errors:
++                    continue
++                reads = found[file]["GGET"]
++                if original not in errors:
++                    reads = reads & found[original]["GGET"]
++                for name in sorted(reads & only_in_branches):
++                    problems.append(
++                        f'File "{original.relative_to(root)}": the {build_dir.name}'
++                        f" build reads the global `{name}`, which only an"
++                        f" #ifdef/#ifndef branch this build leaves out sets"
++                        f" (driver {entry.parent.name})."
++                    )
+     return problems
+
+
+diff --git a/template/tools/test_globals.py b/template/tools/test_globals.py
+index f1e8020..e8cb5f0 100755
+--- a/template/tools/test_globals.py
++++ b/template/tools/test_globals.py
+@@ -84,6 +84,30 @@ class GlobalsTest(unittest.TestCase):
+             [],
+         )
+
++    def test_separate_package_cannot_supply_missing_global(self):
++        problems = self._check(
++            {
++                "needs/driver.lua": "--#ifdef DRIVERCENTRAL\nrequire('helpers')\n--#endif\nReport()\n",
++                "needs/helpers.lua": "require 'report'\n",
++                "needs/report.lua": "function Report() return {} end\n",
++                "unrelated/driver.lua": "function Report() return {} end\n",
++            }
++        )
++        self.assertEqual(len(problems), 1)
++        self.assertIn("oss build reads the global `Report`", problems[0])
++        self.assertIn("(driver needs)", problems[0])
++
++    def test_required_module_can_supply_global_in_same_package(self):
++        self.assertEqual(
++            self._check(
++                {
++                    "d/driver.lua": "pcall(require, 'report')\nReport()\n",
++                    "d/report.lua": "function Report() return {} end\n",
++                }
++            ),
++            [],
++        )
++
+     def test_a_name_read_only_inside_its_branch_passes(self):
+         self.assertEqual(
+             self._check(
 diff --git a/tests/light/test_contract.lua b/tests/light/test_contract.lua
-index 4167c96..c981fb2 100644
+index d9b071a..6bd7b64 100644
 --- a/tests/light/test_contract.lua
 +++ b/tests/light/test_contract.lua
 @@ -1,7 +1,7 @@
  local T = require("testlib")
  local Types = require("lib.light.types")
- 
--local CONTRACT = { api = 1, hash = 526899584 }
-+local CONTRACT = { api = 1, hash = 2095189211 }
- 
+
+-local CONTRACT = { api = 1, hash = 1332581566 }
++local CONTRACT = { api = 1, hash = 83124602 }
+
  --- @return string
  local function source()
 diff --git a/tests/light/test_light_behavior.lua b/tests/light/test_light_behavior.lua
-index bf9d255..6ccc167 100644
+index 2755726..7fd35ce 100644
 --- a/tests/light/test_light_behavior.lua
 +++ b/tests/light/test_light_behavior.lua
-@@ -564,11 +564,11 @@ case(function()
+@@ -579,11 +579,11 @@ case(function()
    T.eq("once at the first report", #w.m.shown, 1)
    w.proxy:send("SET_LEVEL", { LEVEL = 50 })
    w.run(5000)
@@ -289,11 +546,11 @@ index bf9d255..6ccc167 100644
 +  T.eq("not for the same Min", #w.m.shown, 3)
    w.restore()
  end)
- 
-@@ -579,4 +579,41 @@ case(function()
+
+@@ -594,4 +594,41 @@ case(function()
    w.restore()
  end)
- 
+
 +T.section("stop ends timers without notifying the unloading proxy, and discards late reports")
 +case(function()
 +  local w = K.world(K.ES, {}, 20)
@@ -333,10 +590,10 @@ index bf9d255..6ccc167 100644
 +
  T.finish()
 diff --git a/tests/light/test_proxy.lua b/tests/light/test_proxy.lua
-index ba03db5..38f3fdb 100644
+index 7222e39..3500d17 100644
 --- a/tests/light/test_proxy.lua
 +++ b/tests/light/test_proxy.lua
-@@ -594,22 +594,67 @@ do
+@@ -589,22 +589,67 @@ do
    -- The Kelvin shown is the proxy's own conversion of the xy it holds, not the one a report came with.
    local K = math.floor(Color.kelvin(0.3, 0.32) + 0.5)
    p:sync(rest(true, 0.5, { x = 0.3, y = 0.32, mode = "cct", kelvin = 6000 }))
@@ -377,7 +634,7 @@ index ba03db5..38f3fdb 100644
 +    { minOn = 1, maxOn = 80, on = true, level = Range.toLevel(0.5, 1, 80), color = RED }
 +  )
    take()
- 
+
    p = make()
    p:online({ dims = true, color = true })
    p:sync(rest(true, 0.5, { x = 0.3, y = 0.32, mode = "cct", kelvin = 6000 }))
@@ -408,7 +665,7 @@ index ba03db5..38f3fdb 100644
 +  T.eq("with an off brightness", { shown.on, shown.level }, { false, 0 })
    take()
  end
- 
+
 diff --git a/tests/ui_page_js.test.mjs b/tests/ui_page_js.test.mjs
 index 3238d04..44b4b0d 100644
 --- a/tests/ui_page_js.test.mjs

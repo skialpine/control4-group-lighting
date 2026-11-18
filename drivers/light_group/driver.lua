@@ -59,24 +59,34 @@ local gShown = {}
 -- Status
 ---------------------------------------------------------------------------
 
---- @param status { total: integer, on: integer, inSync: boolean }
+--- @param status GroupStatus
 local function showStatus(status)
   if status.total == 0 then
     UpdateProperty("Driver Status", "No lights selected")
     UpdateProperty("Group Summary", "")
-  elseif status.known == 0 then
-    UpdateProperty("Driver Status", "Waiting for light feedback")
-    UpdateProperty("Group Summary", "No light levels reported")
   else
-    UpdateProperty("Driver Status", "Online")
-    UpdateProperty(
-      "Group Summary",
-      string.format("%d of %d on%s", status.on, status.total, status.inSync and "" or ", out of sync")
-    )
+    local summary = string.format("%d of %d on", status.on, status.total)
+    if status.offline == status.total then
+      UpdateProperty("Driver Status", "Offline")
+      summary = "All lights offline"
+    elseif status.offline > 0 then
+      UpdateProperty("Driver Status", string.format("%d of %d lights offline", status.offline, status.total))
+    elseif status.known == 0 then
+      UpdateProperty("Driver Status", "Waiting for light feedback")
+      summary = "No light levels reported"
+    else
+      UpdateProperty("Driver Status", "Online")
+      if status.known == status.total and not status.inSync then
+        summary = summary .. ", out of sync"
+      end
+    end
+    UpdateProperty("Group Summary", summary)
   end
   values:update("LIGHTS_ON", status.on, "NUMBER")
   values:update("LIGHTS_TOTAL", status.total, "NUMBER")
-  values:update("LIGHTS_IN_SYNC", status.inSync, "BOOL")
+  if status.known == status.total or Variables.LIGHTS_IN_SYNC == nil then
+    values:update("LIGHTS_IN_SYNC", status.inSync, "BOOL")
+  end
 
   -- Incomplete feedback is not an on/off or sync transition. Keep the last known event baseline.
   if status.known < status.total then
@@ -287,6 +297,9 @@ end
 --- What the group and each of its lights show, for the cycle to compare with its scenes.
 local function trackScene()
   local snapshot = group.snapshot()
+  if snapshot.offline > 0 then
+    return
+  end
   local shown = {}
   for _, member in ipairs(snapshot.lights) do
     shown[member.id] = { level = member.level, kelvin = member.kelvin, x = member.x, y = member.y }
@@ -442,6 +455,7 @@ function OnDriverDestroyed()
     CancelTimer(name)
   end
   group.stop()
+  light:stop()
 end
 
 ---------------------------------------------------------------------------

@@ -60,7 +60,7 @@ function M.new()
 
   function project:member(id, native)
     local x, y = C4:ColorCCTtoXY(3200)
-    self.members[id] = { id = id, native = native, joined = {}, level = 0, x = x, y = y }
+    self.members[id] = { id = id, native = native, online = true, joined = {}, level = 0, x = x, y = y }
     self.devices[id] = {
       deviceName = "Member " .. id,
       driverFileName = "light_v2.c4i",
@@ -81,10 +81,12 @@ function M.new()
       [1001] = tostring(member.level),
       [1200] = member.x .. "," .. member.y .. ",1",
     }
-    for variable, value in pairs(values) do
-      project.devices[member.id].variables[tostring(variable)] = { value = value }
-      for _, scope in pairs(project.scopes) do
-        scope.env.OnWatchedVariableChanged(member.id, variable, value)
+    if member.online then
+      for variable, value in pairs(values) do
+        project.devices[member.id].variables[tostring(variable)] = { value = value }
+        for _, scope in pairs(project.scopes) do
+          scope.env.OnWatchedVariableChanged(member.id, variable, value)
+        end
       end
     end
     for group, memberId in pairs(member.joined) do
@@ -92,15 +94,21 @@ function M.new()
       if scope then
         scope.env.ExecuteCommand("LIGHT_GROUP_STATE", {
           MEMBER_ID = memberId,
-          ONLINE = "true",
-          ON = values[1000],
-          LEVEL = values[1001],
-          X = tostring(member.x),
-          Y = tostring(member.y),
-          MODE = "cct",
+          ONLINE = tostring(member.online),
+          ON = member.online and values[1000] or "false",
+          LEVEL = member.online and values[1001] or "0",
+          X = member.online and tostring(member.x) or nil,
+          Y = member.online and tostring(member.y) or nil,
+          MODE = member.online and "cct" or nil,
         })
       end
     end
+  end
+
+  function project:setOnline(id, online)
+    local member = self.members[id]
+    member.online = online
+    publish(member)
   end
 
   function project:send(from, destination, command, params)
@@ -118,6 +126,8 @@ function M.new()
       return
     elseif command == "LIGHT_GROUP_LEAVE" then
       member.joined[tonumber(params.GROUP_ID)] = nil
+      return
+    elseif not member.online then
       return
     elseif command == "RAMP_TO_LEVEL" then
       member.level = tonumber(params.LEVEL)
@@ -159,6 +169,9 @@ function M.new()
     end
     env.ShimSetClock(clock.now)
     env.C4.SetTimer = timer
+    function env.C4:UpdateProperty(name, value)
+      env.Properties[name] = value
+    end
     env.C4.SendDataToUI = function() end
     env.C4.SendToDevice = function(_, destination, command, params)
       return project:send(id, destination, command, params or {})

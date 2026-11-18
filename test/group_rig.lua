@@ -95,11 +95,12 @@ function M.rig(native, options)
         ExecuteCommand("LIGHT_GROUP_STATE", {
           MEMBER_ID = tostring(member.id),
           ONLINE = tostring(member.online),
-          ON = tostring(s.on),
-          LEVEL = changes[1001],
-          X = tostring(s.color.x),
-          Y = tostring(s.color.y),
-          MODE = s.color.mode,
+          ON = member.online and tostring(s.on) or "false",
+          LEVEL = member.online and changes[1001] or "0",
+          X = member.online and tostring(s.color.x) or nil,
+          Y = member.online and tostring(s.color.y) or nil,
+          MODE = member.online and s.color.mode or nil,
+          KELVIN = member.online and s.color.kelvin and tostring(s.color.kelvin) or nil,
           DIMS = "true",
           HAS_COLOR = "true",
           CCT_MIN = "2000",
@@ -108,6 +109,10 @@ function M.rig(native, options)
       end
     end
     local sent, sendUI, restoreClock = C4.SendToDevice, C4.SendDataToUI, h.clock.restore
+    local updateProperty = C4.UpdateProperty
+    function C4:UpdateProperty(name, value)
+      Properties[name] = value
+    end
     C4.SendDataToUI = function() end
     h.commands = {}
     C4.SendToDevice = function(c4, id, command, params, ...)
@@ -181,6 +186,7 @@ function M.rig(native, options)
     end
     h.clock.restore = function()
       C4.SendToDevice, C4.SendDataToUI = sent, sendUI
+      C4.UpdateProperty = updateProperty
       restoreClock()
     end
     F.dofileBuild(D.path(D.root(), rig.folder), "oss")
@@ -229,7 +235,7 @@ function M.rig(native, options)
             tell(member, false)
           end
         else
-          h.light:lost(false)
+          h.light:lost()
         end
       end,
       back = function()
@@ -240,7 +246,7 @@ function M.rig(native, options)
         require("group.group").refresh()
       end,
       suspend = function()
-        h.light:lost(true)
+        h.light:lost()
       end,
       resume = function()
         require("group.group").refresh()
