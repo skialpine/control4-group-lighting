@@ -10,6 +10,7 @@ local Buttons = require("lib.light.buttons")
 local Caps = require("lib.light.caps")
 local Color = require("lib.light.color")
 local Range = require("lib.light.range")
+local Settings = require("lib.light.settings")
 
 require("drivers-common-public.global.lib")
 require("lib.utils")
@@ -378,11 +379,13 @@ function LightProxy:_levelChanging(current, target, ms, endsAt, preset, ramp)
     current = math.max(1, current)
   end
   log:debug("LIGHT_BRIGHTNESS_CHANGING: %s to %s, rate=%s", current, target, ms)
+  -- Director gives Default On, Off and Previous On IDs precedence over the numeric target during a fade (#241).
+  local builtInPreset = preset == 1 or preset == 2 or preset == Settings.PREVIOUS_ON_PRESET_ID
   SendToProxy(self.profile.proxy, "LIGHT_BRIGHTNESS_CHANGING", {
     LIGHT_BRIGHTNESS_CURRENT = current,
     LIGHT_BRIGHTNESS_TARGET = target,
     RATE = ms,
-    LIGHT_BRIGHTNESS_TARGET_PRESET_ID = preset,
+    LIGHT_BRIGHTNESS_TARGET_PRESET_ID = not builtInPreset and preset or nil,
   }, "NOTIFY", true)
   -- A light on its way up is on from the start of its ramp, as one fading to off is on until its end.
   if target > 0 then

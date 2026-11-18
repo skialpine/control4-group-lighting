@@ -9,11 +9,12 @@ The changes were developed in a separate template checkout, tested through a
 fresh Copier render, then copied into this driver's template-owned files:
 
 - `src/lib/light.lua`: unload cleanup and read-only diagnostics.
-- `src/lib/light/proxy.lua` and `types.lua`: complete display state callbacks
-  and keypad notifications for colors learned after the proxy's capability update.
+- `src/lib/light/proxy.lua` and `types.lua`: complete display state callbacks,
+  keypad notifications for late colors, and numeric brightness targets during
+  fades to built-in presets ([template issue #241](https://github.com/finitelabs/control4-driver-template/issues/241)).
 - `src/lib/ui/page.js`: public authenticated JSON requests.
 - `test/light_rig.lua` and `light_conformance.lua`: optional reload checks
-  and conformance coverage for late keypad colors.
+  and conformance coverage for late keypad colors and brightness preset fades.
 - `tools/globals.py` and `test_globals.py`: compare preprocessor globals within
   each driver's package and its literal dependencies.
 

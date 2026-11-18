@@ -83,10 +83,33 @@ index fd734ca..b4fb76d 100644
  function Light:reset()
    self:_endRun()
 diff --git a/template/src/lib/light/proxy.lua b/template/src/lib/light/proxy.lua
-index 99217ee..6d9e5e4 100644
+index 99217ee..e6d110b 100644
 --- a/template/src/lib/light/proxy.lua
 +++ b/template/src/lib/light/proxy.lua
-@@ -617,6 +617,10 @@ function LightProxy:_syncSettings()
+@@ -10,6 +10,7 @@ local Buttons = require("lib.light.buttons")
+ local Caps = require("lib.light.caps")
+ local Color = require("lib.light.color")
+ local Range = require("lib.light.range")
++local Settings = require("lib.light.settings")
+
+ require("drivers-common-public.global.lib")
+ require("lib.utils")
+@@ -378,11 +379,13 @@ function LightProxy:_levelChanging(current, target, ms, endsAt, preset, ramp)
+     current = math.max(1, current)
+   end
+   log:debug("LIGHT_BRIGHTNESS_CHANGING: %s to %s, rate=%s", current, target, ms)
++  -- Director gives Default On, Off and Previous On IDs precedence over the numeric target during a fade (#241).
++  local builtInPreset = preset == 1 or preset == 2 or preset == Settings.PREVIOUS_ON_PRESET_ID
+   SendToProxy(self.profile.proxy, "LIGHT_BRIGHTNESS_CHANGING", {
+     LIGHT_BRIGHTNESS_CURRENT = current,
+     LIGHT_BRIGHTNESS_TARGET = target,
+     RATE = ms,
+-    LIGHT_BRIGHTNESS_TARGET_PRESET_ID = preset,
++    LIGHT_BRIGHTNESS_TARGET_PRESET_ID = not builtInPreset and preset or nil,
+   }, "NOTIFY", true)
+   -- A light on its way up is on from the start of its ramp, as one fading to off is on until its end.
+   if target > 0 then
+@@ -617,6 +620,10 @@ function LightProxy:_syncSettings()
      if not commanded[self.settings.P_BUTTON_COLORS] then
        for _, button in ipairs(Buttons.ALL) do
          local on, off = self.settings:buttonColors(button)
@@ -97,7 +120,7 @@ index 99217ee..6d9e5e4 100644
          self.buttons[button] = { on = on, off = off }
        end
      end
-@@ -728,13 +732,32 @@ function LightProxy:shown()
+@@ -728,13 +735,32 @@ function LightProxy:shown()
      kelvin = Color.kelvin(color.x, color.y)
      kelvin = kelvin and math.floor(kelvin + 0.5) or nil
    end
@@ -134,7 +157,7 @@ index 99217ee..6d9e5e4 100644
  end
 
  --- A read the proxy, or a keypad over a Button Link, asks.
-@@ -756,10 +779,7 @@ function LightProxy:answer(strCommand, _tParams, _view, idBinding)
+@@ -756,10 +782,7 @@ function LightProxy:answer(strCommand, _tParams, _view, idBinding)
      local asking = self:_button(idBinding)
      if asking ~= nil then
        -- A keypad button bound to a Button Link asks over that link, and is answered on it.
@@ -232,7 +255,7 @@ index 0065080..189a0fb 100644
      call: call,
      follow: follow,
 diff --git a/template/test/light_conformance.lua b/template/test/light_conformance.lua
-index 2230507..91dfd1d 100644
+index 2230507..9e863ed 100644
 --- a/template/test/light_conformance.lua
 +++ b/template/test/light_conformance.lua
 @@ -188,10 +188,11 @@ end
@@ -249,7 +272,62 @@ index 2230507..91dfd1d 100644
    local errors = {}
    local logError = log.error
    log.error = function(self, fmt, ...)
-@@ -556,6 +557,25 @@ function C.run(T, rig)
+@@ -408,6 +409,54 @@ function C.run(T, rig)
+       T.eq(name .. ": the next off keeps Previous On at 50", p.previousOn, 50)
+       finish(h)
+     end)
++
++    T.section(name .. ": an in-progress fade uses the numeric target for built-in brightness presets")
++    for _, fade in ipairs({
++      { name = "Default On", preset = 1, target = 55 },
++      { name = "Previous On", preset = 10, target = 37, start = 37 },
++      { name = "Off", preset = 2, target = 0 },
++      { name = "Custom", preset = 3, target = 42, carriesPreset = true },
++      { name = "Direct ramp", target = 55 },
++    }) do
++      C.case(T, name, function()
++        local h = fresh(rig)
++        local p = h.proxy
++        p:send("SET_LEVEL", { LEVEL = fade.start or 75 })
++        h.clock.run(ms)
++        if fade.target > 0 then
++          p:send("DYNAMIC_OFF")
++          h.clock.run(ms)
++        end
++        p:mark()
++        if fade.preset then
++          p:send("SET_BRIGHTNESS_TARGET", {
++            LIGHT_BRIGHTNESS_TARGET = fade.target,
++            LIGHT_BRIGHTNESS_TARGET_PRESET_ID = fade.preset,
++            RATE = 750,
++          })
++        else
++          p:send("RAMP_TO_LEVEL", { LEVEL = fade.target, TIME = 750 })
++        end
++        h.clock.run(100)
++        local changing = p:last("LIGHT_BRIGHTNESS_CHANGING") or {}
++        T.eq(name .. ": " .. fade.name .. " in-progress feedback", {
++          level = changing.LIGHT_BRIGHTNESS_TARGET,
++          rate = changing.RATE,
++          preset = changing.LIGHT_BRIGHTNESS_TARGET_PRESET_ID,
++        }, {
++          level = fade.target,
++          rate = 750,
++          preset = fade.carriesPreset and fade.preset or nil,
++        })
++        h.clock.run(ms)
++        local changed = p:last("LIGHT_BRIGHTNESS_CHANGED") or {}
++        T.eq(name .. ": " .. fade.name .. " settled feedback", {
++          level = changed.LIGHT_BRIGHTNESS_CURRENT,
++          preset = changed.LIGHT_BRIGHTNESS_CURRENT_PRESET_ID,
++        }, { level = fade.target, preset = fade.preset })
++        finish(h)
++      end)
++    end
+   end
+
+   if hasColor then
+@@ -556,6 +605,25 @@ function C.run(T, rig)
        finish(h)
      end)
 
@@ -275,7 +353,7 @@ index 2230507..91dfd1d 100644
      if ramps then
        T.section(name .. ": a link's hold ramps the light while held, and the release holds it there")
        C.case(T, name, function()
-@@ -985,6 +1005,31 @@ function C.run(T, rig)
+@@ -985,6 +1053,31 @@ function C.run(T, rig)
      end)
    end
 

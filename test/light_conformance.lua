@@ -409,6 +409,54 @@ function C.run(T, rig)
       T.eq(name .. ": the next off keeps Previous On at 50", p.previousOn, 50)
       finish(h)
     end)
+
+    T.section(name .. ": an in-progress fade uses the numeric target for built-in brightness presets")
+    for _, fade in ipairs({
+      { name = "Default On", preset = 1, target = 55 },
+      { name = "Previous On", preset = 10, target = 37, start = 37 },
+      { name = "Off", preset = 2, target = 0 },
+      { name = "Custom", preset = 3, target = 42, carriesPreset = true },
+      { name = "Direct ramp", target = 55 },
+    }) do
+      C.case(T, name, function()
+        local h = fresh(rig)
+        local p = h.proxy
+        p:send("SET_LEVEL", { LEVEL = fade.start or 75 })
+        h.clock.run(ms)
+        if fade.target > 0 then
+          p:send("DYNAMIC_OFF")
+          h.clock.run(ms)
+        end
+        p:mark()
+        if fade.preset then
+          p:send("SET_BRIGHTNESS_TARGET", {
+            LIGHT_BRIGHTNESS_TARGET = fade.target,
+            LIGHT_BRIGHTNESS_TARGET_PRESET_ID = fade.preset,
+            RATE = 750,
+          })
+        else
+          p:send("RAMP_TO_LEVEL", { LEVEL = fade.target, TIME = 750 })
+        end
+        h.clock.run(100)
+        local changing = p:last("LIGHT_BRIGHTNESS_CHANGING") or {}
+        T.eq(name .. ": " .. fade.name .. " in-progress feedback", {
+          level = changing.LIGHT_BRIGHTNESS_TARGET,
+          rate = changing.RATE,
+          preset = changing.LIGHT_BRIGHTNESS_TARGET_PRESET_ID,
+        }, {
+          level = fade.target,
+          rate = 750,
+          preset = fade.carriesPreset and fade.preset or nil,
+        })
+        h.clock.run(ms)
+        local changed = p:last("LIGHT_BRIGHTNESS_CHANGED") or {}
+        T.eq(name .. ": " .. fade.name .. " settled feedback", {
+          level = changed.LIGHT_BRIGHTNESS_CURRENT,
+          preset = changed.LIGHT_BRIGHTNESS_CURRENT_PRESET_ID,
+        }, { level = fade.target, preset = fade.preset })
+        finish(h)
+      end)
+    end
   end
 
   if hasColor then

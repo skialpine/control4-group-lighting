@@ -421,6 +421,14 @@ Template for a new release entry (copy below the heading, fill in, uncomment):
 - Removed
 -->
 
+## v2026111802-beta.1 - 2026-11-18
+
+### Fixed
+
+- Report the numeric brightness target during fades to Default On, Previous On,
+  and Off. This avoids the transient `65535` target reported on Control4 OS
+  3.4.3. Settled notifications still identify the preset.
+
 ## v2026111801-beta.1 - 2026-11-18
 
 ### Added
