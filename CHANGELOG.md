@@ -18,6 +18,13 @@ Template for a new release entry (copy below the heading, fill in, uncomment):
 - Removed
 -->
 
+## v2026111901-beta.1 - 2026-11-19
+
+### Changed
+
+- Update the template to v0.9.114, which now supplies the brightness fade fix
+  introduced in the previous beta. Rebase the remaining local template patch.
+
 ## v2026111803-beta.1 - 2026-11-18
 
 ### Fixed

@@ -1,8 +1,8 @@
 diff --git a/example-driver/drivers/example_light/driver.lua b/example-driver/drivers/example_light/driver.lua
-index f185be6..e68cfe3 100644
+index 7be839e..b4ddaf2 100644
 --- a/example-driver/drivers/example_light/driver.lua
 +++ b/example-driver/drivers/example_light/driver.lua
-@@ -186,6 +186,12 @@ function OnDriverLateInit()
+@@ -188,6 +188,12 @@ function OnDriverLateInit()
    --#endif
  end
 
@@ -83,51 +83,10 @@ index fd734ca..b4fb76d 100644
  function Light:reset()
    self:_endRun()
 diff --git a/template/src/lib/light/proxy.lua b/template/src/lib/light/proxy.lua
-index 99217ee..7f1f241 100644
+index 2b594b3..7f1f241 100644
 --- a/template/src/lib/light/proxy.lua
 +++ b/template/src/lib/light/proxy.lua
-@@ -361,9 +361,8 @@ end
- --- @param target integer
- --- @param ms integer
- --- @param endsAt integer
----- @param preset integer|nil
- --- @param ramp LightView The view it was told from, whose device brightnesses an off reads.
--function LightProxy:_levelChanging(current, target, ms, endsAt, preset, ramp)
-+function LightProxy:_levelChanging(current, target, ms, endsAt, ramp)
-   self.toldSince.level = true
-   local told = self.level
-   told.preOn = told.preOn or (target > 0 and (told.level or 0) < 1)
-@@ -371,18 +370,18 @@ function LightProxy:_levelChanging(current, target, ms, endsAt, preset, ramp)
-     -- A fade to off from where a ramp from off had lit the light: the proxy keeps that level at the off.
-     told.preOn = false
-   end
--  told.target, told.endsAt, told.preset = target, endsAt, preset
-+  told.target, told.endsAt = target, endsAt
-   told.from, told.to, told.startAt, told.ms = ramp.level, ramp.on and ramp.levelTarget or 0, endsAt - ms, ms
-   -- The proxy takes the light's state from CURRENT: one on its way up from off is lit from the start.
-   if target > 0 then
-     current = math.max(1, current)
-   end
-   log:debug("LIGHT_BRIGHTNESS_CHANGING: %s to %s, rate=%s", current, target, ms)
-+  -- No preset id: given one, the proxy's target reads the id itself (1, 2, 10) or the one before, never TARGET.
-   SendToProxy(self.profile.proxy, "LIGHT_BRIGHTNESS_CHANGING", {
-     LIGHT_BRIGHTNESS_CURRENT = current,
-     LIGHT_BRIGHTNESS_TARGET = target,
-     RATE = ms,
--    LIGHT_BRIGHTNESS_TARGET_PRESET_ID = preset,
-   }, "NOTIFY", true)
-   -- A light on its way up is on from the start of its ramp, as one fading to off is on until its end.
-   if target > 0 then
-@@ -510,7 +509,7 @@ function LightProxy:_syncLevel(view, now, lo, hi)
-     if told.target == target and sameEnd(told.endsAt, endsAt) and not self.resayDue.level then
-       return
-     end
--    self:_levelChanging(shownLevel(view.level, lo, hi), target, view.levelMs, endsAt, preset, view)
-+    self:_levelChanging(shownLevel(view.level, lo, hi), target, view.levelMs, endsAt, view)
-     return
-   end
-   local lit = asked
-@@ -617,6 +616,10 @@ function LightProxy:_syncSettings()
+@@ -616,6 +616,10 @@ function LightProxy:_syncSettings()
      if not commanded[self.settings.P_BUTTON_COLORS] then
        for _, button in ipairs(Buttons.ALL) do
          local on, off = self.settings:buttonColors(button)
@@ -138,7 +97,7 @@ index 99217ee..7f1f241 100644
          self.buttons[button] = { on = on, off = off }
        end
      end
-@@ -728,13 +731,32 @@ function LightProxy:shown()
+@@ -727,13 +731,32 @@ function LightProxy:shown()
      kelvin = Color.kelvin(color.x, color.y)
      kelvin = kelvin and math.floor(kelvin + 0.5) or nil
    end
@@ -175,7 +134,7 @@ index 99217ee..7f1f241 100644
  end
 
  --- A read the proxy, or a keypad over a Button Link, asks.
-@@ -756,10 +778,7 @@ function LightProxy:answer(strCommand, _tParams, _view, idBinding)
+@@ -755,10 +778,7 @@ function LightProxy:answer(strCommand, _tParams, _view, idBinding)
      local asking = self:_button(idBinding)
      if asking ~= nil then
        -- A keypad button bound to a Button Link asks over that link, and is answered on it.
@@ -417,33 +376,10 @@ index 2230507..9876011 100644
      T.section(name .. ": a command the device rests apart from is told once, where the device rests")
      C.case(T, name, function()
 diff --git a/template/test/light_proxy_fake.lua b/template/test/light_proxy_fake.lua
-index d4ba770..682875c 100644
+index 385b8b6..682875c 100644
 --- a/template/test/light_proxy_fake.lua
 +++ b/template/test/light_proxy_fake.lua
-@@ -14,6 +14,8 @@
- ---   rewrite it, so the others can lag; without dimming it lists the brightness, click and hold rates 0.
- --- - A light that does not dim is asked GET_LIGHT_LEVEL inside the ONLINE_CHANGED that brings it online.
- --- - A LIGHT_COLOR_CHANGED naming a preset id without its origin is dropped whole.
-+--- - A LIGHT_BRIGHTNESS_CHANGING naming a preset id never puts its target in 1110: the id itself goes there
-+---   for 1, 2 and 10, and 1110 keeps what it held for any other id.
- --- - GET_SETUP is answered from `setup`, or from `newLight` until the proxy is told the light has color.
- ---
- --- It is the driver's library-independent view of the proxy: it knows no lib.light internals.
-@@ -339,7 +341,12 @@ function Proxy:_heard(id, cmd, params)
-       self.lastLit = current
-     end
-     self:_var("1001", current)
--    self:_var("1110", self:dims() and target or nil)
-+    local preset = tonumber(params.LIGHT_BRIGHTNESS_TARGET_PRESET_ID)
-+    if preset == nil then
-+      self:_var("1110", self:dims() and target or nil)
-+    elseif preset == 1 or preset == 2 or preset == 10 then
-+      self:_var("1110", self:dims() and preset or nil)
-+    end
-   elseif cmd == "LIGHT_COLOR_CHANGED" then
-     if params.LIGHT_COLOR_CURRENT_PRESET_ID ~= nil and params.LIGHT_COLOR_CURRENT_PRESET_ORIGIN == nil then
-       return
-@@ -487,10 +494,11 @@ function Proxy:percent()
+@@ -494,10 +494,11 @@ function Proxy:percent()
    return math.floor(c.from + (c.to - c.from) * p + 0.5)
  end
 
@@ -679,56 +615,10 @@ index d9b071a..6bd7b64 100644
  --- @return string
  local function source()
 diff --git a/tests/light/test_light_behavior.lua b/tests/light/test_light_behavior.lua
-index 2755726..39a8fd9 100644
+index 2f5d2c8..39a8fd9 100644
 --- a/tests/light/test_light_behavior.lua
 +++ b/tests/light/test_light_behavior.lua
-@@ -525,7 +525,7 @@ case(function()
-   w.restore()
- end)
-
--T.section("the proxy's level commands: RAMP_TO_LEVEL takes its TIME, and a target keeps its preset id")
-+T.section("the proxy's level commands: RAMP_TO_LEVEL takes its TIME, and a target's preset id is told once it lands")
- case(function()
-   local w = K.world(K.ES, {}, 20)
-   w.proxy:send("RAMP_TO_LEVEL", { LEVEL = 60, TIME = 1500 })
-@@ -537,12 +537,34 @@ case(function()
-     { LIGHT_BRIGHTNESS_TARGET = 40, RATE = 1000, LIGHT_BRIGHTNESS_TARGET_PRESET_ID = 3 }
-   )
-   T.eq(
--    "the preset id told with it",
-+    "the fade names no preset",
-     (w.proxy:last("LIGHT_BRIGHTNESS_CHANGING") or {}).LIGHT_BRIGHTNESS_TARGET_PRESET_ID,
--    3
-+    nil
-   )
-   w.run(5000)
-   T.eq("lands", w.proxy.level, 40)
-+  T.eq(
-+    "where it names the preset",
-+    (w.proxy:last("LIGHT_BRIGHTNESS_CHANGED") or {}).LIGHT_BRIGHTNESS_CURRENT_PRESET_ID,
-+    3
-+  )
-+  w.restore()
-+end)
-+
-+T.section("the app's On from off shows its level as the target for the whole fade")
-+case(function()
-+  local w = K.world(K.ES, {}, 0)
-+  w.proxy:presetLevel(55)
-+  w.run(100)
-+  w.proxy:appOn(55)
-+  local shown = {}
-+  for _ = 1, 7 do
-+    w.run(100)
-+    shown[#shown + 1] = w.proxy.vars["1110"] and w.proxy.vars["1110"].value
-+  end
-+  T.eq("55 at every step", shown, { "55", "55", "55", "55", "55", "55", "55" })
-+  w.run(5000)
-+  T.eq("lands", w.proxy.level, 55)
-   w.restore()
- end)
-
-@@ -579,11 +601,11 @@ case(function()
+@@ -601,11 +601,11 @@ case(function()
    T.eq("once at the first report", #w.m.shown, 1)
    w.proxy:send("SET_LEVEL", { LEVEL = 50 })
    w.run(5000)
@@ -743,7 +633,7 @@ index 2755726..39a8fd9 100644
    w.restore()
  end)
 
-@@ -594,4 +616,41 @@ case(function()
+@@ -616,4 +616,41 @@ case(function()
    w.restore()
  end)
 
@@ -863,36 +753,29 @@ index 7222e39..3500d17 100644
  end
 
 diff --git a/tests/light/test_proxy_fake.lua b/tests/light/test_proxy_fake.lua
-index 220e738..aa29ab5 100644
+index c06f4e5..aa29ab5 100644
 --- a/tests/light/test_proxy_fake.lua
 +++ b/tests/light/test_proxy_fake.lua
-@@ -120,6 +120,26 @@ do
+@@ -123,7 +123,7 @@ end
+ T.section("a CHANGING naming a preset id never shows its target in 1110 (dev 2026-11-18, example_light 1298)")
+ do
+   local p = P.install(clock)
+-  local shown = {}
++  local shown, readback = {}, {}
+   for _, id in ipairs({ 1, 2, 10, 3 }) do
+     tell("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = 55 })
+     tell("LIGHT_BRIGHTNESS_CHANGING", {
+@@ -133,8 +133,10 @@ do
+       LIGHT_BRIGHTNESS_TARGET_PRESET_ID = id,
+     })
+     shown[#shown + 1] = var(p, 1110)
++    readback[#readback + 1] = p:target()
+   end
+   T.eq("the id for 1, 2 and 10, the target before it for any other", shown, { "1", "2", "10", "55" })
++  T.eq("the target helper reads the same values", readback, { 1, 2, 10, 55 })
    p:restore()
  end
 
-+T.section("a CHANGING naming a preset id never shows its target in 1110 (dev 2026-11-18, example_light 1298)")
-+do
-+  local p = P.install(clock)
-+  local shown, readback = {}, {}
-+  for _, id in ipairs({ 1, 2, 10, 3 }) do
-+    tell("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = 55 })
-+    tell("LIGHT_BRIGHTNESS_CHANGING", {
-+      LIGHT_BRIGHTNESS_CURRENT = 55,
-+      LIGHT_BRIGHTNESS_TARGET = 40,
-+      RATE = 2000,
-+      LIGHT_BRIGHTNESS_TARGET_PRESET_ID = id,
-+    })
-+    shown[#shown + 1] = var(p, 1110)
-+    readback[#readback + 1] = p:target()
-+  end
-+  T.eq("the id for 1, 2 and 10, the target before it for any other", shown, { "1", "2", "10", "55" })
-+  T.eq("the target helper reads the same values", readback, { 1, 2, 10, 55 })
-+  p:restore()
-+end
-+
- T.section("a color told with a preset id and no origin is dropped whole (zb 682, dev 2026-10-29)")
- do
-   local p = P.install(clock)
 diff --git a/tests/ui_page_js.test.mjs b/tests/ui_page_js.test.mjs
 index 3238d04..44b4b0d 100644
 --- a/tests/ui_page_js.test.mjs
