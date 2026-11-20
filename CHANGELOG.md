@@ -18,6 +18,18 @@ Template for a new release entry (copy below the heading, fill in, uncomment):
 - Removed
 -->
 
+## v2026112001-beta.1 - 2026-11-20
+
+### Fixed
+
+- Return to Default On when the selected brightness preset is deleted, even when
+  another preset later reuses its ID.
+- Keep Color Agent presets separate from device presets that share an ID.
+
+### Changed
+
+- Update the template to v0.9.116 and add its startup restore check.
+
 ## v2026111901-beta.1 - 2026-11-19
 
 ### Changed

@@ -1,8 +1,8 @@
 # Pending shared template additions
 
 `light-reliability.patch` contains local changes against
-[finitelabs/control4-driver-template v0.9.114](https://github.com/finitelabs/control4-driver-template/tree/v0.9.114)
-(commit `0f02a918174025533c4ec618df176c94719cd4f7`). It includes local changes
+[finitelabs/control4-driver-template v0.9.116](https://github.com/finitelabs/control4-driver-template/tree/v0.9.116)
+(commit `cdbfbfef4aaa0c171247e41c4ec8539538bd75f3`). It includes local changes
 to shared source, example integration, and tests.
 
 The changes were developed in a separate template checkout, tested through a
