@@ -421,6 +421,18 @@ Template for a new release entry (copy below the heading, fill in, uncomment):
 - Removed
 -->
 
+## v2026112002-beta.1 - 2026-11-20
+
+### Fixed
+
+- Clear a deleted Light Group's registration from its native members and cancel
+  its queued light commands. Driver reloads preserve memberships, and members
+  stay registered with their other groups.
+
+### Changed
+
+- Update the shared driver template to v0.9.117.
+
 ## v2026112001-beta.1 - 2026-11-20
 
 ### Fixed

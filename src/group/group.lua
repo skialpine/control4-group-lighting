@@ -384,7 +384,10 @@ end
 
 local function unwatch(member)
   for _, variable in pairs(VARIABLE) do
-    UnregisterVariableListener(member.id, variable)
+    local ok, err = pcall(UnregisterVariableListener, member.id, variable)
+    if not ok then
+      log:debug("Could not remove listener for variable %s of %s: %s", variable, member.name, tostring(err))
+    end
   end
 end
 
@@ -934,6 +937,9 @@ end
 
 --- Tells the light model what the group is and shows now, after its lights or settings changed.
 function Group.refresh()
+  if not active then
+    return
+  end
   if #members == 0 then
     loseConnection()
     onChange(Group.status())
@@ -942,9 +948,22 @@ function Group.refresh()
   evaluate(true)
 end
 
+local function leave(member)
+  if not member.groupJoined then
+    return
+  end
+  local ok, err = pcall(SendToDevice, member.protocolId, "LIGHT_GROUP_LEAVE", { GROUP_ID = tostring(C4:GetDeviceID()) })
+  if not ok then
+    log:warn("Leaving %s's native group failed: %s", member.name, tostring(err))
+  end
+end
+
 --- Sets the group's lights.
 --- @param devices { id: integer, name: string }[] In the order they are commanded.
 function Group.setMembers(devices)
+  if not active then
+    return
+  end
   local kept = {}
   for _, member in ipairs(members) do
     kept[member.id] = member
@@ -966,13 +985,7 @@ function Group.setMembers(devices)
     now[#now + 1] = member
   end
   for _, member in pairs(kept) do
-    if member.groupJoined then
-      local ok, err =
-        pcall(SendToDevice, member.protocolId, "LIGHT_GROUP_LEAVE", { GROUP_ID = tostring(C4:GetDeviceID()) })
-      if not ok then
-        log:warn("Leaving %s's native group failed: %s", member.name, tostring(err))
-      end
-    end
+    leave(member)
     unwatch(member)
   end
   members = now
@@ -1012,6 +1025,9 @@ end
 
 --- End this instance's transport work before Director unloads it. No device or proxy commands go out.
 function Group.stop()
+  if not active then
+    return
+  end
   active = false
   refreshAsked, availabilityChanged, feedbackChanged = false, false, false
   for _, name in ipairs({ "GroupQueue", "GroupFeedback", "GroupProbe" }) do
@@ -1020,6 +1036,16 @@ function Group.stop()
   queue, spacing, changedLights, followed = {}, false, {}, nil
   for _, member in ipairs(members) do
     unwatch(member)
+  end
+end
+
+--- Clear members' registrations when the group is removed from the project.
+function Group.dissolve()
+  Group.stop()
+  local departing = members
+  members = {}
+  for _, member in ipairs(departing) do
+    leave(member)
   end
 end
 

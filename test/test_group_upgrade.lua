@@ -41,7 +41,7 @@ local ok, err = xpcall(function()
       motion = motion + 1
     end
   end
-  T.eq("reload sends no light movement commands", motion, 0)
+  T.eq("reload sends no commands other than joins", motion, 0)
   T.eq("the first group is online", a.light.online, true)
   T.eq("the second group is online", b.light.online, true)
   T.eq("the third group is online", c.light.online, true)
@@ -81,6 +81,41 @@ local ok, err = xpcall(function()
   p.clock.run(3500)
   T.eq("scene tracking resumes with complete feedback", cycle.current().id, 1)
   T.eq("the programming variable reports the now-confirmed mismatch", c.env.Variables.LIGHTS_IN_SYNC, "0")
+
+  T.section("Deleting a group clears its own native registration and cancels pending commands")
+  p:load(7104, { 805, 803 })
+  p.clock.run(3000)
+  mixed.configure({ commandDelay = 400 })
+  c.proxy:send("SET_LEVEL", { LEVEL = 60 })
+  local beforeRemoval = #p.commands
+  c.env.OnDriverRemovedFromProject()
+  c.env.OnDriverDestroyed()
+  c.env.OnDriverRemovedFromProject()
+  mixed.setMembers({ { id = 805, name = "Late member selection" } })
+  p.clock.run(3000)
+  T.eq("the deleted group is gone from its native member", p.members[805].joined[7103], nil)
+  T.eq("the overlapping group remains joined", p.members[805].joined[7104], "805")
+  T.eq("the deleted group's member list is empty", mixed.size(), 0)
+  local sent = {}
+  for i = beforeRemoval + 1, #p.commands do
+    local command = p.commands[i]
+    if command.from == 7103 then
+      sent[#sent + 1] = { command.id, command.command, command.params.GROUP_ID }
+    end
+  end
+  T.eq("each protocol driver receives one leave and no queued light command follows", sent, {
+    { 1805, "LIGHT_GROUP_LEAVE", "7103" },
+    { 1806, "LIGHT_GROUP_LEAVE", "7103" },
+  })
+
+  T.section("A deletion callback can still clear registrations after driver teardown")
+  b.env.OnDriverDestroyed()
+  T.eq("ordinary teardown preserves the registration", p.members[803].joined[7102], "803")
+  b.env.OnDriverRemovedFromProject()
+  T.eq("the first member leaves the deleted group", p.members[803].joined[7102], nil)
+  T.eq("the second member leaves the deleted group", p.members[804].joined[7102], nil)
+  T.eq("the first member stays in its other group", p.members[803].joined[7104], "803")
+
   T.eq("no callback raised", p.clock.errors, {})
   a.env.SetTimer("FixtureErrorProbe", 1, function()
     error("fixture timer sentinel")

@@ -450,12 +450,21 @@ function OnDriverLateInit()
   --#endif
 end
 
-function OnDriverDestroyed()
+local function stopDriver()
   for _, name in ipairs({ "UpdateCheck", "LogMode", "CycleHold", "CycleTrack", "TabPush" }) do
     CancelTimer(name)
   end
   group.stop()
   light:stop()
+end
+
+function OnDriverDestroyed()
+  stopDriver()
+end
+
+function OnDriverRemovedFromProject()
+  stopDriver()
+  group.dissolve()
 end
 
 ---------------------------------------------------------------------------
