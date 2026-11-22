@@ -82,6 +82,62 @@ local ok, err = xpcall(function()
   T.eq("scene tracking resumes with complete feedback", cycle.current().id, 1)
   T.eq("the programming variable reports the now-confirmed mismatch", c.env.Variables.LIGHTS_IN_SYNC, "0")
 
+  T.section("Editing a mixed group's Lights preserves retained members and drops late reports")
+  local edited = p:load(7105, { 803, 806 })
+  p.clock.run(3000)
+  local beforeEdit = #p.commands
+  edited.env.Properties.Lights = "806"
+  edited.env.OnPropertyChanged("Lights")
+  p.clock.run(3000)
+  local leave = p.commands[beforeEdit + 1]
+  T.eq("only the removed member's protocol driver is notified", {
+    #p.commands - beforeEdit,
+    leave and leave.id,
+    leave and leave.command,
+    leave and leave.params.GROUP_ID,
+  }, { 1, 1803, "LIGHT_GROUP_LEAVE", "7105" })
+  T.eq("the removed member keeps its other membership", p.members[803].joined[7102], "803")
+  T.eq("the removed member drops the edited group", p.members[803].joined[7105], nil)
+  edited.env.ExecuteCommand("LIGHT_GROUP_STATE", { MEMBER_ID = "803", ONLINE = "true", ON = "true", LEVEL = "99" })
+  p.clock.run(3000)
+  T.eq("an in-flight report from the removed member cannot change the group level", edited.proxy.level, 0)
+
+  local beforeCommand = #p.commands
+  edited.proxy:send("SET_LEVEL", { LEVEL = 27 })
+  p.clock.run(3000)
+  T.eq("the retained standard Light V2 member still follows the group", p.members[806].level, 27)
+  T.eq("the removed member stays at its previous level", p.members[803].level, 50)
+  T.eq("the standard command targets the retained proxy", p.commands[beforeCommand + 1].id, 806)
+
+  local beforeRejoin = #p.commands
+  edited.env.Properties.Lights = "806,803"
+  edited.env.OnPropertyChanged("Lights")
+  p.clock.run(3000)
+  local join = p.commands[beforeRejoin + 1]
+  T.eq("only the re-added member joins, with distinct proxy and protocol IDs", {
+    #p.commands - beforeRejoin,
+    join and join.id,
+    join and join.command,
+    join and join.params.MEMBER_ID,
+  }, { 1, 1803, "LIGHT_GROUP_JOIN", "803" })
+  T.eq("the re-added member registers with the edited group", p.members[803].joined[7105], "803")
+  local rejoined = edited.env.require("group.group").snapshot().lights[2]
+  T.eq("the synchronous join reply supplies the re-added member's level", rejoined.level, 50)
+  local beforeMixed = #p.commands
+  edited.proxy:send("SET_LEVEL", { LEVEL = 40 })
+  p.clock.run(3000)
+  local movement = {}
+  for i = beforeMixed + 1, #p.commands do
+    local command = p.commands[i]
+    if command.from == 7105 then
+      movement[#movement + 1] = { command.id, command.command }
+    end
+  end
+  T.eq("the re-added member uses native transport alongside the standard proxy", movement, {
+    { 806, "RAMP_TO_LEVEL" },
+    { 1803, "LIGHT_GROUP_COMMAND" },
+  })
+
   T.section("Deleting a group clears its own native registration and cancels pending commands")
   p:load(7104, { 805, 803 })
   p.clock.run(3000)

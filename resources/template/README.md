@@ -9,6 +9,8 @@ The changes were developed in a separate template checkout, tested through a
 fresh Copier render, then copied into this driver's template-owned files:
 
 - `src/lib/light.lua`: unload cleanup and read-only diagnostics.
+- `src/lib/light/groups.lua`: skip missing group drivers and clear stale
+  memberships after a second project lookup confirms their absence.
 - `src/lib/light/proxy.lua` and `types.lua`: complete display state callbacks
   and keypad notifications for late colors.
 - `src/lib/ui/page.js`: public authenticated JSON requests.

@@ -82,6 +82,170 @@ index fd734ca..b4fb76d 100644
  --- Reset Driver: end the run, tell offline until the next report, ask the device.
  function Light:reset()
    self:_endRun()
+diff --git a/template/src/lib/light/groups.lua b/template/src/lib/light/groups.lua
+index 6ba52f8..e7a5dfe 100644
+--- a/template/src/lib/light/groups.lua
++++ b/template/src/lib/light/groups.lua
+@@ -14,6 +14,7 @@ require("lib.utils")
+
+ local P_GROUPS = "load_groups"
+ local P_DRIVERS = "light_groups"
++local CONFIRM_MISSING_MS = 1000
+
+ --- What the light tells a group driver: its facts and what its proxy shows, at the end of any change.
+ --- @class LightMemberState
+@@ -27,6 +28,7 @@ local P_DRIVERS = "light_groups"
+
+ --- @class LightGroups
+ --- @field told table<string, string> What each group driver was last told, by group id, as its params' text.
++--- @field missing table<string, table<string, number>> When each membership was first missing from the project.
+ local Groups = {}
+ Groups.__index = Groups
+
+@@ -35,7 +37,56 @@ Groups.P_DRIVERS = P_DRIVERS
+
+ --- @return LightGroups
+ function Groups.new()
+-  return setmetatable({ told = {} }, Groups)
++  return setmetatable({ told = {}, missing = { [P_GROUPS] = {}, [P_DRIVERS] = {} } }, Groups)
++end
++
++local function listed(devices, id)
++  return devices[id] or devices[tostring(id)]
++end
++
++--- Ignore group IDs absent from a healthy project lookup. Two observations spaced apart confirm removal.
++--- @private
++function Groups:_registered(key, groups)
++  if next(groups) == nil then
++    return groups
++  end
++  -- Include this light so an empty or incomplete startup registry cannot erase memberships.
++  local me = C4:GetDeviceID()
++  local ids = { tostring(me) }
++  for groupId in pairs(groups) do
++    if tointeger(groupId) then
++      ids[#ids + 1] = tostring(groupId)
++    end
++  end
++  local ok, devices = pcall(C4.GetDevices, C4, { DeviceIds = table.concat(ids, ",") })
++  if not ok or type(devices) ~= "table" or not listed(devices, me) then
++    self.missing[key] = {}
++    return groups
++  end
++  local now, missing = C4:GetTime(), self.missing[key]
++  local available = {}
++  local changed = false
++  for groupId, member in pairs(groups) do
++    if listed(devices, tointeger(groupId) or groupId) then
++      missing[groupId] = nil
++      available[groupId] = member
++    else
++      local since = missing[groupId]
++      if since and now - since >= CONFIRM_MISSING_MS then
++        groups[groupId], missing[groupId] = nil, nil
++        changed = true
++      elseif not since then
++        missing[groupId] = now
++      end
++      if key == P_DRIVERS then
++        self.told[groupId] = nil
++      end
++    end
++  end
++  if changed then
++    persist:set(key, groups)
++  end
++  return available
+ end
+
+ --- The groups by id, each with whether it keeps the light in sync.
+@@ -49,7 +100,9 @@ end
+ --- @param keepSync boolean
+ function Groups:join(groupId, keepSync)
+   local groups = self:all()
+-  groups[tostring(groupId)] = keepSync
++  local id = tostring(groupId)
++  self.missing[P_GROUPS][id] = nil
++  groups[id] = keepSync
+   persist:set(P_GROUPS, groups)
+ end
+
+@@ -57,10 +110,12 @@ end
+ --- @param groupId integer
+ function Groups:leave(groupId)
+   local groups = self:all()
+-  if groups[tostring(groupId)] == nil then
++  local id = tostring(groupId)
++  self.missing[P_GROUPS][id] = nil
++  if groups[id] == nil then
+     return
+   end
+-  groups[tostring(groupId)] = nil
++  groups[id] = nil
+   persist:set(P_GROUPS, groups)
+ end
+
+@@ -68,7 +123,7 @@ end
+ --- @return integer[]
+ function Groups:synced()
+   local ids = {}
+-  for id, keepSync in pairs(self:all()) do
++  for id, keepSync in pairs(self:_registered(P_GROUPS, self:all())) do
+     local n = tointeger(id)
+     if keepSync and n then
+       ids[#ids + 1] = n
+@@ -106,21 +161,25 @@ end
+ --- @param memberId string
+ function Groups:enroll(groupId, memberId)
+   local drivers = self:drivers()
+-  drivers[tostring(groupId)] = memberId
++  local id = tostring(groupId)
++  self.missing[P_DRIVERS][id] = nil
++  drivers[id] = memberId
+   persist:set(P_DRIVERS, drivers)
+-  self.told[tostring(groupId)] = nil
++  self.told[id] = nil
+ end
+
+ --- Leave a group driver.
+ --- @param groupId integer
+ function Groups:withdraw(groupId)
+   local drivers = self:drivers()
+-  if drivers[tostring(groupId)] == nil then
++  local id = tostring(groupId)
++  self.missing[P_DRIVERS][id] = nil
++  if drivers[id] == nil then
+     return
+   end
+-  drivers[tostring(groupId)] = nil
++  drivers[id] = nil
+   persist:set(P_DRIVERS, drivers)
+-  self.told[tostring(groupId)] = nil
++  self.told[id] = nil
+ end
+
+ --- @param n number|nil
+@@ -156,7 +215,18 @@ function Groups:tell(state)
+     parts[#parts + 1] = k .. "=" .. params[k]
+   end
+   local text = table.concat(parts, ";")
+-  for groupId, memberId in pairs(self:drivers()) do
++  local drivers = self:drivers()
++  local hasUpdates = false
++  for groupId in pairs(drivers) do
++    if self.told[groupId] ~= text then
++      hasUpdates = true
++      break
++    end
++  end
++  if not hasUpdates then
++    return
++  end
++  for groupId, memberId in pairs(self:_registered(P_DRIVERS, drivers)) do
+     local id = tointeger(groupId)
+     if id and self.told[groupId] ~= text then
+       self.told[groupId] = text
 diff --git a/template/src/lib/light/proxy.lua b/template/src/lib/light/proxy.lua
 index 2b594b3..7f1f241 100644
 --- a/template/src/lib/light/proxy.lua
@@ -232,10 +396,34 @@ index 0065080..189a0fb 100644
      call: call,
      follow: follow,
 diff --git a/template/test/light_conformance.lua b/template/test/light_conformance.lua
-index 2230507..9876011 100644
+index 2230507..7516c4b 100644
 --- a/template/test/light_conformance.lua
 +++ b/template/test/light_conformance.lua
-@@ -188,10 +188,11 @@ end
+@@ -22,6 +22,23 @@ C.RIG_VERSION = Rig.VERSION
+ -- What the cases running installed and have not put back.
+ local open = {}
+
++--- Register a simulated group alongside the devices already installed by the rig.
++local function registerGroup(id)
++  local getDevices = C4.GetDevices
++  function C4:GetDevices(filter, ...)
++    local devices = getDevices(self, filter, ...)
++    for requested in (filter and filter.DeviceIds or ""):gmatch("[^,]+") do
++      if tonumber(requested) == id then
++        devices[id] = { deviceName = "Test Group" }
++      end
++    end
++    return devices
++  end
++  open[#open + 1] = function()
++    C4.GetDevices = getDevices
++  end
++end
++
+ --- @param a {x: number, y: number}|nil
+ --- @param b {x: number, y: number}|nil
+ --- @return boolean
+@@ -188,10 +205,11 @@ end
  --- @param state LightValues|nil Where the device starts.
  --- @param variables table<integer, string>|nil What the proxy's variables hold, as after a restart.
  --- @param setup string|nil GET_SETUP's answer in place of the rig's.
@@ -249,7 +437,7 @@ index 2230507..9876011 100644
    local errors = {}
    local logError = log.error
    log.error = function(self, fmt, ...)
-@@ -408,6 +409,67 @@ function C.run(T, rig)
+@@ -408,6 +426,67 @@ function C.run(T, rig)
        T.eq(name .. ": the next off keeps Previous On at 50", p.previousOn, 50)
        finish(h)
      end)
@@ -317,7 +505,7 @@ index 2230507..9876011 100644
    end
 
    if hasColor then
-@@ -556,6 +618,25 @@ function C.run(T, rig)
+@@ -556,6 +635,25 @@ function C.run(T, rig)
        finish(h)
      end)
 
@@ -343,7 +531,23 @@ index 2230507..9876011 100644
      if ramps then
        T.section(name .. ": a link's hold ramps the light while held, and the release holds it there")
        C.case(T, name, function()
-@@ -985,6 +1066,31 @@ function C.run(T, rig)
+@@ -696,6 +794,7 @@ function C.run(T, rig)
+       local h = fresh(rig)
+       local p = h.proxy
+       local handed = {}
++      registerGroup(9001)
+       local sendToDevice = C4.SendToDevice
+       C4.SendToDevice = function(c4, id, cmd, params, ...)
+         handed[#handed + 1] = { id, cmd }
+@@ -723,6 +822,7 @@ function C.run(T, rig)
+       local h = fresh(rig)
+       local p = h.proxy
+       local told = {}
++      registerGroup(9002)
+       local sendToDevice = C4.SendToDevice
+       C4.SendToDevice = function(c4, id, cmd, params, ...)
+         if cmd == "LIGHT_GROUP_STATE" then
+@@ -985,6 +1085,31 @@ function C.run(T, rig)
      end)
    end
 
@@ -601,6 +805,34 @@ index f1e8020..e8cb5f0 100755
      def test_a_name_read_only_inside_its_branch_passes(self):
          self.assertEqual(
              self._check(
+diff --git a/tests/light/behavior_kit.lua b/tests/light/behavior_kit.lua
+index 393adcb..d237555 100644
+--- a/tests/light/behavior_kit.lua
++++ b/tests/light/behavior_kit.lua
+@@ -2,6 +2,7 @@
+ --- proxy commands they send. The suites assert only what the fake proxy shows and where the device ends.
+
+ local M = require("memory_light")
++local Fake = require("light_proxy_fake")
+
+ local K = {}
+
+@@ -94,6 +95,15 @@ function K.world(base, o, level)
+   return w
+ end
+
++--- Add a group to the world's project registry and return the registry for edits.
++function K.registerGroup(w, id)
++  local devices = C4:GetDevices()
++  devices[Fake.PROXY_DEVICE].variables = w.proxy.vars
++  devices[id] = { deviceName = "Group" }
++  ShimSetDevices(devices)
++  return devices
++end
++
+ --- @param a number|nil
+ --- @param b number|nil
+ --- @param tolerance number|nil
 diff --git a/tests/light/test_contract.lua b/tests/light/test_contract.lua
 index d9b071a..6bd7b64 100644
 --- a/tests/light/test_contract.lua
@@ -675,6 +907,69 @@ index 2f5d2c8..39a8fd9 100644
 +end)
 +
  T.finish()
+diff --git a/tests/light/test_light_group.lua b/tests/light/test_light_group.lua
+index 0cceb3e..5b26cca 100644
+--- a/tests/light/test_light_group.lua
++++ b/tests/light/test_light_group.lua
+@@ -63,7 +63,8 @@ local function member(level, o)
+   local base = M.copy(o or K.ES)
+   base.profile = M.profile(base)
+   base.profile.loadGroups = true
+-  return K.world(base, {}, level)
++  local w = K.world(base, {}, level)
++  return w, K.registerGroup(w, GROUP)
+ end
+
+ --- A group driver's command to the member, on the proxy binding.
+@@ -220,6 +221,33 @@ case(function()
+   w.restore()
+ end)
+
++T.section("a missing group receives no feedback and is eventually forgotten")
++case(function()
++  local w, devices = member(20)
++  local handed, restore = recordHanded()
++  local survivor = GROUP + 1
++  devices[survivor] = { deviceName = "Other group" }
++  w.proxy:send("LIGHT_GROUP_JOIN", { GROUP_ID = GROUP, MEMBER_ID = "77" })
++  w.proxy:send("LIGHT_GROUP_JOIN", { GROUP_ID = survivor, MEMBER_ID = "78" })
++  devices[GROUP] = nil
++  local first = #handed + 1
++  w.proxy:send("SET_LEVEL", { LEVEL = 55 })
++  T.eq("the first missing lookup retains the membership", w.light.groups:drivers()[tostring(GROUP)], "77")
++  w.run(1500)
++  w.proxy:send("SET_LEVEL", { LEVEL = 65 })
++  T.eq("confirmed missing membership removed", w.light.groups:drivers()[tostring(GROUP)], nil)
++  T.eq("the other membership is retained", w.light.groups:drivers()[tostring(survivor)], "78")
++  local destinations = {}
++  for i = first, #handed do
++    if handed[i][2] == "LIGHT_GROUP_STATE" then
++      destinations[#destinations + 1] = handed[i][1]
++    end
++  end
++  T.eq("only the surviving group gets the two new levels", destinations, { survivor, survivor })
++  restore()
++  w.restore()
++end)
++
+ T.section("a light that does not offer load groups takes no group driver's command")
+ case(function()
+   local base = M.copy(K.ES)
+diff --git a/tests/light/test_light_groups.lua b/tests/light/test_light_groups.lua
+index 21fa17f..4bb4e75 100644
+--- a/tests/light/test_light_groups.lua
++++ b/tests/light/test_light_groups.lua
+@@ -28,7 +28,9 @@ local function world(level)
+   local profile = M.profile(o)
+   profile.loadGroups = true
+   o.profile = profile
+-  return K.world(o, {}, level)
++  local w = K.world(o, {}, level)
++  K.registerGroup(w, GROUP)
++  return w
+ end
+
+ --- The commands sent since the mark that change the level.
 diff --git a/tests/light/test_proxy.lua b/tests/light/test_proxy.lua
 index 7222e39..3500d17 100644
 --- a/tests/light/test_proxy.lua

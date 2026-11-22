@@ -421,6 +421,20 @@ Template for a new release entry (copy below the heading, fill in, uncomment):
 - Removed
 -->
 
+## v2026112101-beta.1 - 2026-11-21
+
+### Changed
+
+- List Light Group under SkiAlpine Labs in Composer.
+
+### Fixed
+
+- Let compatible member drivers using this shared library skip deleted groups
+  when a leave message is missed. Clear the stale membership after a second
+  project lookup confirms the group's absence.
+- Add regression coverage for editing mixed groups, including late reports from
+  removed members and transport selection when a native member rejoins.
+
 ## v2026112002-beta.1 - 2026-11-20
 
 ### Fixed

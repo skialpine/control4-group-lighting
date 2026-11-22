@@ -22,6 +22,23 @@ C.RIG_VERSION = Rig.VERSION
 -- What the cases running installed and have not put back.
 local open = {}
 
+--- Register a simulated group alongside the devices already installed by the rig.
+local function registerGroup(id)
+  local getDevices = C4.GetDevices
+  function C4:GetDevices(filter, ...)
+    local devices = getDevices(self, filter, ...)
+    for requested in (filter and filter.DeviceIds or ""):gmatch("[^,]+") do
+      if tonumber(requested) == id then
+        devices[id] = { deviceName = "Test Group" }
+      end
+    end
+    return devices
+  end
+  open[#open + 1] = function()
+    C4.GetDevices = getDevices
+  end
+end
+
 --- @param a {x: number, y: number}|nil
 --- @param b {x: number, y: number}|nil
 --- @return boolean
@@ -777,6 +794,7 @@ function C.run(T, rig)
       local h = fresh(rig)
       local p = h.proxy
       local handed = {}
+      registerGroup(9001)
       local sendToDevice = C4.SendToDevice
       C4.SendToDevice = function(c4, id, cmd, params, ...)
         handed[#handed + 1] = { id, cmd }
@@ -804,6 +822,7 @@ function C.run(T, rig)
       local h = fresh(rig)
       local p = h.proxy
       local told = {}
+      registerGroup(9002)
       local sendToDevice = C4.SendToDevice
       C4.SendToDevice = function(c4, id, cmd, params, ...)
         if cmd == "LIGHT_GROUP_STATE" then

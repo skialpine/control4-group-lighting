@@ -14,6 +14,7 @@ require("lib.utils")
 
 local P_GROUPS = "load_groups"
 local P_DRIVERS = "light_groups"
+local CONFIRM_MISSING_MS = 1000
 
 --- What the light tells a group driver: its facts and what its proxy shows, at the end of any change.
 --- @class LightMemberState
@@ -27,6 +28,7 @@ local P_DRIVERS = "light_groups"
 
 --- @class LightGroups
 --- @field told table<string, string> What each group driver was last told, by group id, as its params' text.
+--- @field missing table<string, table<string, number>> When each membership was first missing from the project.
 local Groups = {}
 Groups.__index = Groups
 
@@ -35,7 +37,56 @@ Groups.P_DRIVERS = P_DRIVERS
 
 --- @return LightGroups
 function Groups.new()
-  return setmetatable({ told = {} }, Groups)
+  return setmetatable({ told = {}, missing = { [P_GROUPS] = {}, [P_DRIVERS] = {} } }, Groups)
+end
+
+local function listed(devices, id)
+  return devices[id] or devices[tostring(id)]
+end
+
+--- Ignore group IDs absent from a healthy project lookup. Two observations spaced apart confirm removal.
+--- @private
+function Groups:_registered(key, groups)
+  if next(groups) == nil then
+    return groups
+  end
+  -- Include this light so an empty or incomplete startup registry cannot erase memberships.
+  local me = C4:GetDeviceID()
+  local ids = { tostring(me) }
+  for groupId in pairs(groups) do
+    if tointeger(groupId) then
+      ids[#ids + 1] = tostring(groupId)
+    end
+  end
+  local ok, devices = pcall(C4.GetDevices, C4, { DeviceIds = table.concat(ids, ",") })
+  if not ok or type(devices) ~= "table" or not listed(devices, me) then
+    self.missing[key] = {}
+    return groups
+  end
+  local now, missing = C4:GetTime(), self.missing[key]
+  local available = {}
+  local changed = false
+  for groupId, member in pairs(groups) do
+    if listed(devices, tointeger(groupId) or groupId) then
+      missing[groupId] = nil
+      available[groupId] = member
+    else
+      local since = missing[groupId]
+      if since and now - since >= CONFIRM_MISSING_MS then
+        groups[groupId], missing[groupId] = nil, nil
+        changed = true
+      elseif not since then
+        missing[groupId] = now
+      end
+      if key == P_DRIVERS then
+        self.told[groupId] = nil
+      end
+    end
+  end
+  if changed then
+    persist:set(key, groups)
+  end
+  return available
 end
 
 --- The groups by id, each with whether it keeps the light in sync.
@@ -49,7 +100,9 @@ end
 --- @param keepSync boolean
 function Groups:join(groupId, keepSync)
   local groups = self:all()
-  groups[tostring(groupId)] = keepSync
+  local id = tostring(groupId)
+  self.missing[P_GROUPS][id] = nil
+  groups[id] = keepSync
   persist:set(P_GROUPS, groups)
 end
 
@@ -57,10 +110,12 @@ end
 --- @param groupId integer
 function Groups:leave(groupId)
   local groups = self:all()
-  if groups[tostring(groupId)] == nil then
+  local id = tostring(groupId)
+  self.missing[P_GROUPS][id] = nil
+  if groups[id] == nil then
     return
   end
-  groups[tostring(groupId)] = nil
+  groups[id] = nil
   persist:set(P_GROUPS, groups)
 end
 
@@ -68,7 +123,7 @@ end
 --- @return integer[]
 function Groups:synced()
   local ids = {}
-  for id, keepSync in pairs(self:all()) do
+  for id, keepSync in pairs(self:_registered(P_GROUPS, self:all())) do
     local n = tointeger(id)
     if keepSync and n then
       ids[#ids + 1] = n
@@ -106,21 +161,25 @@ end
 --- @param memberId string
 function Groups:enroll(groupId, memberId)
   local drivers = self:drivers()
-  drivers[tostring(groupId)] = memberId
+  local id = tostring(groupId)
+  self.missing[P_DRIVERS][id] = nil
+  drivers[id] = memberId
   persist:set(P_DRIVERS, drivers)
-  self.told[tostring(groupId)] = nil
+  self.told[id] = nil
 end
 
 --- Leave a group driver.
 --- @param groupId integer
 function Groups:withdraw(groupId)
   local drivers = self:drivers()
-  if drivers[tostring(groupId)] == nil then
+  local id = tostring(groupId)
+  self.missing[P_DRIVERS][id] = nil
+  if drivers[id] == nil then
     return
   end
-  drivers[tostring(groupId)] = nil
+  drivers[id] = nil
   persist:set(P_DRIVERS, drivers)
-  self.told[tostring(groupId)] = nil
+  self.told[id] = nil
 end
 
 --- @param n number|nil
@@ -156,7 +215,18 @@ function Groups:tell(state)
     parts[#parts + 1] = k .. "=" .. params[k]
   end
   local text = table.concat(parts, ";")
-  for groupId, memberId in pairs(self:drivers()) do
+  local drivers = self:drivers()
+  local hasUpdates = false
+  for groupId in pairs(drivers) do
+    if self.told[groupId] ~= text then
+      hasUpdates = true
+      break
+    end
+  end
+  if not hasUpdates then
+    return
+  end
+  for groupId, memberId in pairs(self:_registered(P_DRIVERS, drivers)) do
     local id = tointeger(groupId)
     if id and self.told[groupId] ~= text then
       self.told[groupId] = text
