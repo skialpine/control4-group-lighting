@@ -1,7 +1,7 @@
 <devicedata>
   <name>Light Group</name>
   <version/>
-  <manufacturer>Open Source</manufacturer>
+  <manufacturer>SkiAlpine Labs</manufacturer>
   <model>Light Group</model>
   <creator>skialpine</creator>
   <control>lua_gen</control>
